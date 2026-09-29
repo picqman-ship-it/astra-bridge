@@ -172,4 +172,4 @@ npm run deploy          # wrangler deploy -c wrangler.personal.jsonc
 
 When updating an existing install, deploy the Worker **before** restarting the Mac agent: the relay also accepts the older 10 s JSON heartbeat, so an older agent keeps working against a newer relay, but a newer agent relies on the relay's ping auto-response. When rolling back, roll back the agent first (restore `src/agent.mjs` and restart the LaunchAgent), then the Worker. `src/agent-lib.mjs` must sit next to `src/agent.mjs`.
 
-This repository does not deploy automatically and never touches your LaunchAgents or `~/.astra-bridge` keys unless you run the helper scripts yourself.
+This repository does not deploy automatically and never touches your LaunchAgents or `~/.astra-bridge` keys unless you run the helper scripts or `./install-macos.sh` yourself (the installer asks before it deploys or loads the agent).

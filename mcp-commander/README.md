@@ -146,7 +146,7 @@ A separate entrypoint serves a restricted tool set over MCP Streamable HTTP for 
   File/search tools are confined to explicit `roots`; `set_config_value` is never exposed; shell
   and process tools exist only in an explicit `trustedTerminal` mode, which is arbitrary code
   execution as your user (the roots do not sandbox it). The GUI tools exist only with
-  `"trustedGui": true` (set by hand in `remote.json`); they operate any app window of your user,
+  `"trustedGui": true` (`remote:setup --trusted-gui`, or set by hand in `remote.json`); they operate any app window of your user,
   not just the roots.
 * A root may not be, contain or be inside a protected location: both config dirs, this
   installation, Node's prefix, `~/Library/LaunchAgents`, `~/.ssh`, `~/.claude`, `~/.config` and
