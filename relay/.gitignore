@@ -1,0 +1,22 @@
+# deps / build / tooling
+node_modules/
+node_modules
+.wrangler/
+.test-tmp/
+.dry-run*/
+dist/
+coverage/
+.DS_Store
+
+# secrets and local config
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+wrangler.personal.jsonc
+wrangler.*.local.jsonc

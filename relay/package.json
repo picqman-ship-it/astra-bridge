@@ -1,0 +1,26 @@
+{
+  "name": "astra-bridge-relay",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy -c wrangler.personal.jsonc",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/build.mjs src/tool-policy.ts src/mcp.ts src/beta-registry.ts src/agent-auth.ts src/oauth.ts src/oauth-store.ts src/access-auth.ts src/index.ts && node --test test/*.test.mjs",
+    "smoke": "node src/smoke.mjs",
+    "agent": "node src/agent.mjs",
+    "deploy:dry-run": "wrangler deploy -c wrangler.personal.jsonc --dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260927.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.94.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "jose": "^6.2.12",
+    "ws": "^8.18.3"
+  }
+}

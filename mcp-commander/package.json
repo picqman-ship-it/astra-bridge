@@ -1,0 +1,52 @@
+{
+  "name": "mcp-commander",
+  "version": "0.3.0",
+  "description": "Lean MCP server for terminal control, process sessions, file editing and search \u2014 an independent reimplementation of Desktop Commander MCP's core ideas; the fuzzy-search algorithm and several message formats follow Desktop Commander (MIT), see LICENSE",
+  "type": "module",
+  "bin": {
+    "mcp-commander": "dist/index.js",
+    "mcp-commander-http": "dist/http.js",
+    "mcp-commander-remote-stdio": "dist/remote-stdio.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "docs/remote-runbook.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js dist/http.js dist/remote-stdio.js && node scripts/build-native.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test --test-concurrency=1 \"test/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "remote:setup": "node dist/remote/setup.js",
+    "remote:serve": "node dist/http.js",
+    "remote:doctor": "node dist/remote/doctor.js",
+    "remote:smoke": "node scripts/http-smoke.mjs",
+    "reliability:smoke": "node scripts/reliability-smoke.mjs",
+    "gui:smoke": "node scripts/gui-smoke.mjs",
+    "service:install": "node dist/remote/service.js install",
+    "service:status": "node dist/remote/service.js status",
+    "service:uninstall": "node dist/remote/service.js uninstall",
+    "service:print": "node dist/remote/service.js print",
+    "release:snapshot": "node scripts/package-release.mjs",
+    "e2e": "node scripts/e2e-claude.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "@vscode/ripgrep": "^1.18.0"
+  }
+}

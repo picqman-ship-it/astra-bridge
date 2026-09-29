@@ -1,0 +1,29 @@
+# dependencies and build output
+node_modules/
+node_modules
+dist/
+build/
+release/
+coverage/
+.wrangler/
+.test-tmp/
+.dry-run*/
+*.tgz
+
+# secrets and personal config — never commit
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+wrangler.personal.jsonc
+wrangler.*.local.jsonc
+remote.json
+
+# local noise
+.DS_Store
+*.log

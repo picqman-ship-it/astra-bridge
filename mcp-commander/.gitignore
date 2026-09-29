@@ -1,0 +1,28 @@
+node_modules/
+node_modules
+dist/
+build/
+release/
+coverage/
+.test-tmp/
+*.tgz
+*.tar.gz
+*.sha256
+.DS_Store
+
+# secrets / runtime state (never inside the repo)
+.env
+.env.*
+*.pem
+*.key
+remote.json
+token
+*.log
+*.jsonl
+
+# editor / merge leftovers
+*.orig
+*.bak
+
+# local report written by scripts/verify-installed.mjs (endpoint and check results of your machine)
+docs/installed-service-verification-*.json

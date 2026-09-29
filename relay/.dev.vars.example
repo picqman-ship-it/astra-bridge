@@ -1,0 +1,14 @@
+# Local secrets for `npx wrangler dev`. Copy to .dev.vars (gitignored) and fill in values
+# locally. For a deployed Worker use `npx wrangler secret put <NAME>` instead.
+# Never commit real values. All three are optional; an empty value keeps that feature off.
+
+# Static bearer for /mcp in MCP_AUTH_MODE "static" (operator smoke tests, >= 32 chars). Ignored in "access" mode.
+# Generate with: openssl rand -base64 48
+MCP_BEARER_TOKEN=
+
+# Owner secret typed on the Worker's own /oauth/authorize consent page (static mode only, >= 32 chars).
+# Deleting it disables the Worker's OAuth server and every token it issued.
+OAUTH_OWNER_SECRET=
+
+# Exact token served at /.well-known/openai-apps-challenge for OpenAI Apps domain verification.
+OPENAI_APPS_CHALLENGE=

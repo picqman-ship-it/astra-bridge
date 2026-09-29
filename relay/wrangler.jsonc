@@ -1,0 +1,64 @@
+// Template configuration — do not put your real values in this file.
+//   cp wrangler.jsonc wrangler.personal.jsonc   (gitignored), edit that copy,
+//   then `npm run deploy` (= wrangler deploy -c wrangler.personal.jsonc).
+// Every REPLACE_WITH_* / <your-...> value below is a placeholder: deployed as-is the Worker
+// fails closed (/mcp returns 503 and signed device requests are rejected), and `npm test`
+// checks that this committed file keeps only placeholders.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "astra-bridge-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-27",
+  "durable_objects": {
+    "bindings": [
+      { "name": "DEVICE_RELAY", "class_name": "DeviceRelay" },
+      { "name": "OAUTH_STORE", "class_name": "OAuthStore" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DeviceRelay"] },
+    { "tag": "v2", "new_sqlite_classes": ["OAuthStore"] }
+  ],
+  // Drives DeviceRelay.checkAndAlert() via the Worker's scheduled() handler (src/index.ts).
+  // The device counts as down 75 s after its last ping (or at once when the socket
+  // closes); the alert goes out on the 2nd consecutive failed 5-min check, so roughly
+  // 5-11 min after an outage starts. Without the optional ALERT_EMAIL binding below the
+  // check still runs but sends nothing.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // OPTIONAL liveness alert email. Enabling it needs a zone with Cloudflare Email Routing
+  // turned on and a verified destination address in that account. Then uncomment the
+  // block, set destination_address to that verified address, and set ALERT_FROM_ADDRESS
+  // (an address on the Email Routing zone) and ALERT_TO_ADDRESS below. While the binding
+  // is absent, alerting is a no-op.
+  // "send_email": [
+  //   { "name": "ALERT_EMAIL", "destination_address": "you@example.com" }
+  // ],
+  "vars": {
+    // Ed25519 SPKI public keys (base64 DER) of the Mac agent key and the signed-RPC
+    // client key. Only public keys belong here; private keys stay on the Mac.
+    "AGENT_PUBLIC_KEY_B64": "REPLACE_WITH_AGENT_PUBLIC_KEY_B64",
+    "CLIENT_PUBLIC_KEY_B64": "REPLACE_WITH_CLIENT_PUBLIC_KEY_B64",
+    // Device id of your Mac. Must equal ASTRA_DEVICE_ID in the agent's environment.
+    "AGENT_DEVICE_ID": "my-mac",
+    "CLIENT_DEVICE_ID": "my-mac",
+    "MCP_DEVICE_ID": "my-mac",
+    // Optional: only used when the send_email binding above is enabled.
+    "ALERT_FROM_ADDRESS": "alerts@example.com",
+    "ALERT_TO_ADDRESS": "you@example.com",
+    // Identity of the Worker's own OAuth server (used only in MCP_AUTH_MODE "static").
+    // OAUTH_OWNER_SECRET is a Worker secret and must never appear here.
+    "OAUTH_ISSUER": "https://<your-worker>.<your-subdomain>.workers.dev",
+    "OAUTH_RESOURCE": "https://<your-worker>.<your-subdomain>.workers.dev/mcp",
+    // Cloudflare Access Managed OAuth protects /mcp. Access mode fails closed (503)
+    // until TEAM_DOMAIN and POLICY_AUD hold real values.
+    // Signed /v1/device/* stays outside Access; the Worker verifies its signatures.
+    "MCP_AUTH_MODE": "access",
+    "TEAM_DOMAIN": "https://<your-team>.cloudflareaccess.com",
+    "POLICY_AUD": "REPLACE_WITH_ACCESS_AUD",
+    "ACCESS_ALLOWED_EMAILS": "you@example.com"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "invocation_logs": false }
+  }
+}

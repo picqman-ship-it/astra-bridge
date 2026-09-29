@@ -1,0 +1,15 @@
+// Merge this opt-in snippet only after creating the D1 database manually.
+// Do not put this binding in wrangler.jsonc until the beta rollout gate is approved.
+{
+  "vars": {
+    "BETA_REGISTRY_ENABLED": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "BETA_REGISTRY",
+      "database_name": "astra-bridge-beta",
+      "database_id": "REPLACE_WITH_CREATED_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
