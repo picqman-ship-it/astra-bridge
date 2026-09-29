@@ -135,7 +135,7 @@ test("personal config: inconsistent device ids and unparseable files are reporte
   try {
     const file = path.join(dir, "wrangler.personal.jsonc");
     const template = fs.readFileSync(TEMPLATE, "utf8");
-    fs.writeFileSync(file, setStringProperty(template, ["vars", "MCP_DEVICE_ID"], "other-mac"));
+    fs.writeFileSync(file, setStringProperty(template, ["vars", "MCP_DEVICE_ID"], "other-mac"), { mode: 0o600 });
     assert.match(readPersonalConfig(file).problems.join(), /differ/);
     fs.writeFileSync(file, "{ nope");
     assert.match(readPersonalConfig(file).error, /cannot parse/);

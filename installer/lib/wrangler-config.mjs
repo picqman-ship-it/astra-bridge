@@ -4,7 +4,7 @@
 
 import fs from "node:fs";
 import { parseJsonc, setStringProperty } from "./jsonc.mjs";
-import { writeFileAtomic } from "./util.mjs";
+import { shQuote, writeFileAtomic } from "./util.mjs";
 import {
   isPlaceholder,
   normalizeRelayUrl,
@@ -51,7 +51,10 @@ function valid(fn, raw) {
  * "configured" from "still to do" without re-validating.
  */
 export function readPersonalConfig(file) {
-  if (!fs.existsSync(file)) return { exists: false };
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!st) return { exists: false };
+  const error = personalConfigProblem(file, st);
+  if (error) return { exists: true, error };
   const text = fs.readFileSync(file, "utf8");
   let data;
   try {
@@ -60,6 +63,13 @@ export function readPersonalConfig(file) {
     return { exists: true, text, error: `cannot parse ${file}: ${err.message}` };
   }
   return { exists: true, text, data, ...interpret(data) };
+}
+
+export function personalConfigProblem(file, st, uid = process.getuid?.()) {
+  if (!st.isFile()) return `${file} must be a regular file (no symbolic links)`;
+  if (uid !== undefined && st.uid !== uid) return `${file} is owned by another user`;
+  if ((st.mode & 0o777) !== 0o600) return `${file} must have mode 0600; fix with: chmod 600 ${shQuote(file)}`;
+  return null;
 }
 
 export function interpret(data) {
@@ -127,5 +137,10 @@ export function applyUpdates(text, updates) {
 
 /** Writes the personal config 0600 (it holds your email and device id; no secrets). */
 export function writePersonalConfig(file, text) {
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st) {
+    const error = personalConfigProblem(file, st);
+    if (error) throw new Error(error);
+  }
   writeFileAtomic(file, text, 0o600);
 }

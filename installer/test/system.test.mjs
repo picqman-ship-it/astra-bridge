@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { generateKeyPairSync, verify } from "node:crypto";
@@ -194,7 +193,7 @@ test("agent log: the last meaningful event is reported with a cause", () => {
 
 test("Access classification distinguishes Access, the Worker's own answers and misconfiguration", () => {
   const H = (h) => new Headers(h);
-  assert.equal(classifyAccess({ status: 401, headers: H({ "www-authenticate": 'Bearer resource_metadata="https://r.x.workers.dev/.well-known/cloudflare-access-protected-resource/mcp"' }) }).state, "verified");
+  assert.equal(classifyAccess({ status: 401, headers: H({ "www-authenticate": 'Bearer resource_metadata="https://r.x.workers.dev/.well-known/cloudflare-access-protected-resource/mcp"' }) }, { base: "https://r.x.workers.dev" }).state, "challenge");
   // The Worker's own static-mode challenge must never count as Access.
   assert.equal(classifyAccess({ status: 401, headers: H({ "www-authenticate": 'Bearer resource_metadata="https://r.x.workers.dev/.well-known/oauth-protected-resource/mcp"' }) }).state, "unknown");
   assert.equal(classifyAccess({ status: 401, headers: H({}) }).state, "not-protected");
@@ -205,43 +204,35 @@ test("Access classification distinguishes Access, the Worker's own answers and m
   assert.equal(classifyAccess({ status: 200, headers: H({}) }).state, "unknown");
 });
 
-test("relay probes: health, signed status (verifiable signature) and Access, against a local server", async (t) => {
+test("relay probes: health, signed status (verifiable signature) and Access, with injected transport", async (t) => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const dir = tmpDir();
   const keyFile = path.join(dir, "client-private.pem");
   fs.writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   const seen = [];
-  const server = http.createServer((req, res) => {
+  const fetchImpl = async (input, init = {}) => {
+    const req = { url: new URL(input).pathname, headers: Object.fromEntries(new Headers(init.headers)), method: init.method ?? "GET" };
     seen.push({ url: req.url, headers: req.headers, method: req.method });
-    if (req.url === "/healthz") return res.end(JSON.stringify({ ok: true, service: "astra-bridge-relay" }));
+    if (req.url === "/healthz") return Response.json({ ok: true, service: "astra-bridge-relay" });
     if (req.url === "/v1/device/my-mac/status") {
       const canonical = [req.headers["x-astra-timestamp"], req.headers["x-astra-nonce"], "GET", req.url, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"].join("\n");
       const ok = verify(null, Buffer.from(canonical), publicKey, Buffer.from(req.headers["x-astra-signature"], "base64"));
-      res.statusCode = ok ? 200 : 401;
-      return res.end(JSON.stringify(ok ? { ok: true, agentConnected: true, mcpHealthy: true, lastSeenAgeMs: 1200 } : { error: "unauthorized" }));
+      return Response.json(ok ? { ok: true, agentConnected: true, mcpHealthy: true, lastSeenAgeMs: 1200 } : { error: "unauthorized" }, { status: ok ? 200 : 401 });
     }
     if (req.url === "/mcp") {
-      res.statusCode = 401;
-      res.setHeader("www-authenticate", 'Bearer resource_metadata="https://h/.well-known/cloudflare-access-protected-resource/mcp"');
-      return res.end();
+      return new Response(null, { status: 401, headers: { "www-authenticate": 'Bearer resource_metadata="https://h/.well-known/cloudflare-access-protected-resource/mcp"' } });
     }
-    res.statusCode = 404;
-    res.end("{}");
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    return new Response("{}", { status: 404 });
+  };
   t.after(() => {
-    server.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const port = server.address().port;
-  // The probes only ever build https URLs; route them to the local plain-http server.
-  const fetchImpl = (url, init) => fetch(String(url).replace("https://relay.test", `http://127.0.0.1:${port}`), init);
   const base = "https://relay.test";
 
   assert.deepEqual((await probeHealth(base, { fetchImpl })).ok, true);
   const st = await probeAgentStatus(base, "my-mac", keyFile, { fetchImpl });
   assert.deepEqual(st, { ok: true, status: 200, agentConnected: true, mcpHealthy: true, lastSeenAgeMs: 1200 });
-  assert.equal((await probeAccess(base, { fetchImpl })).state, "verified");
+  assert.equal((await probeAccess(base, { fetchImpl })).state, "unknown", "a challenge on a different origin is never verified");
   assert.equal((await probeAgentStatus(base, "my-mac", path.join(dir, "missing.pem"), { fetchImpl })).ok, false);
   const unreachable = await probeHealth("https://relay.test", { fetchImpl: () => Promise.reject(new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } })) });
   assert.deepEqual(unreachable, { ok: false, error: "ENOTFOUND" });

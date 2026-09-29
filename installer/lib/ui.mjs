@@ -102,8 +102,8 @@ export function createUi({ interactive, yes = false, out = process.stdout, input
 
     /** Yes/no. Non-interactive: --yes means yes; without it, a checkpoint naming --yes. */
     async confirm(prompt, { defaultYes = true, what } = {}) {
+      if (yes) return true;
       if (!interactive) {
-        if (yes) return true;
         throw new Checkpoint(`confirmation needed: ${what ?? prompt}`, {
           instructions: ["Re-run in a terminal to answer interactively, or add --yes to accept this step."],
         });

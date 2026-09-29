@@ -158,3 +158,16 @@ export function setStringProperty(text, path, value) {
   const [{ start, end }] = hits;
   return text.slice(0, start) + JSON.stringify(value) + text.slice(end);
 }
+
+/** Inserts a missing top-level string while preserving comments and all other fields. */
+export function setTopLevelString(text, key, value) {
+  const data = parseJsonc(text);
+  if (!data || Array.isArray(data) || typeof data !== "object") throw new Error("config must be an object");
+  if (Object.hasOwn(data, key)) return setStringProperty(text, [key], value);
+  const start = /^(?:\s|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*\{/.exec(text);
+  if (!start || typeof value !== "string") throw new Error("cannot insert config property");
+  const offset = start[0].length;
+  const out = `${text.slice(0, offset)}\n  ${JSON.stringify(key)}: ${JSON.stringify(value)}${Object.keys(data).length ? "," : ""}${text.slice(offset)}`;
+  if (parseJsonc(out)[key] !== value) throw new Error("config insertion did not round-trip");
+  return out;
+}

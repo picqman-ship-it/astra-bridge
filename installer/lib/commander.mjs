@@ -5,10 +5,29 @@
 // enforces. The installer never loosens them.
 
 import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { run, writeFileAtomic } from "./util.mjs";
+import { commanderEnv } from "../../relay/src/agent-lib.mjs";
 
 const PROTECTED_ENV = "MCP_COMMANDER_PROTECTED_PATHS";
+
+function protectedEnv(ctx, base = ctx.childEnv) {
+  const key = path.join(ctx.astraHome, "agent-private.pem");
+  return commanderEnv(base, ctx.relayDir, {
+    keyFiles: [key, ...(fs.existsSync(key) ? [fs.realpathSync(key)] : [])], homedir: ctx.home,
+  });
+}
+
+function withProtection(ctx, fn) {
+  const previous = process.env[PROTECTED_ENV];
+  process.env[PROTECTED_ENV] = protectedEnv(ctx, { [PROTECTED_ENV]: previous })[PROTECTED_ENV];
+  try { return fn(); }
+  finally {
+    if (previous === undefined) delete process.env[PROTECTED_ENV];
+    else process.env[PROTECTED_ENV] = previous;
+  }
+}
 
 /**
  * Loads remote.json the way the agent's mcp-commander child will: the agent adds its code
@@ -25,15 +44,10 @@ export async function loadCommanderConfig(ctx) {
     return { exists: true, raw, error: "mcp-commander is not built yet, so remote.json cannot be validated" };
   }
   const { loadRemoteConfig } = await import(pathToFileURL(ctx.commanderConfigModule).href);
-  const previous = process.env[PROTECTED_ENV];
-  process.env[PROTECTED_ENV] = [ctx.relayDir, previous].filter(Boolean).join(":");
   try {
-    return { exists: true, raw, cfg: loadRemoteConfig(ctx.commanderRemoteDir) };
+    return { exists: true, raw, cfg: withProtection(ctx, () => loadRemoteConfig(ctx.commanderRemoteDir)) };
   } catch (err) {
     return { exists: true, raw, error: err.message };
-  } finally {
-    if (previous === undefined) delete process.env[PROTECTED_ENV];
-    else process.env[PROTECTED_ENV] = previous;
   }
 }
 
@@ -43,11 +57,11 @@ export async function loadCommanderConfig(ctx) {
  * root may ever contain or sit inside it.
  */
 export function runSetup(ctx, { workspace, terminal = false, gui = false, replace = false }) {
-  const args = [ctx.commanderSetup, "--remote-dir", ctx.commanderRemoteDir, "--root", workspace, "--protect", ctx.repoDir];
+  const args = [ctx.commanderSetup, "--remote-dir", ctx.commanderRemoteDir, "--root", workspace, "--protect", ctx.repoDir, "--protect", ctx.astraHome];
   if (terminal) args.push("--trusted-terminal");
   if (gui) args.push("--trusted-gui");
   if (replace) args.push("--replace-config");
-  return run(ctx.execPath, args, { env: ctx.childEnv });
+  return run(ctx.execPath, args, { env: protectedEnv(ctx) });
 }
 
 /**
@@ -66,7 +80,7 @@ export async function updateCommanderConfig(ctx, raw, { terminal, gui, protect }
   }
   const text = `${JSON.stringify(next, null, 2)}\n`;
   const { parseRemoteConfig } = await import(pathToFileURL(ctx.commanderConfigModule).href);
-  parseRemoteConfig(text, ctx.commanderRemoteDir); // throws with a user-facing message
+  withProtection(ctx, () => parseRemoteConfig(text, ctx.commanderRemoteDir));
   writeFileAtomic(ctx.remoteConfigFile, text, 0o600);
   return next;
 }

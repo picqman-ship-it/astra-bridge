@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { assertSafeLaunchctl } from "./context.mjs";
 import { KEY_FILES } from "./keys.mjs";
 import { createLaunchd, findOtherAgents } from "./launchd.mjs";
+import { installedPaths, metadataFile, recordInstallation } from "./install-metadata.mjs";
 import { Checkpoint, InstallerError, shQuote } from "./util.mjs";
 import { readPersonalConfig } from "./wrangler-config.mjs";
 
@@ -16,27 +17,30 @@ function present(file) {
   return st && (st.isFile() || st.isSymbolicLink()) ? file : null;
 }
 
-export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui) {
+export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui, { makeLaunchd = createLaunchd } = {}) {
   if (!dryRun) assertSafeLaunchctl(ctx);
   const { readTemplate } = await import(pathToFileURL(ctx.installAgent).href);
   const { label } = readTemplate();
   const plistFile = path.join(ctx.launchAgentsDir, `${label}.plist`);
-  const launchd = createLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
+  const launchd = makeLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
   const personal = readPersonalConfig(ctx.personalConfig);
   const workerName = personal.values?.workerName ?? "astra-bridge-relay";
 
   const actions = [];
   const st = launchd.status();
+  if (st.loaded === null) throw new InstallerError(`agent shutdown is UNKNOWN: ${st.error}; nothing removed`);
   if (st.loaded) {
     actions.push({
-      text: `stop the agent (launchctl bootout ${launchd.target})`,
+      text: `stop the agent (launchctl bootout ${shQuote(launchd.target)})`,
       run: async () => {
-        launchd.bootout();
-        if (!(await launchd.waitUnloaded())) throw new InstallerError("the agent did not stop within 15 s", { hint: `Try: launchctl bootout ${launchd.target}` });
+        if (launchd.bootout().status !== 0) throw new InstallerError("launchctl bootout failed; shutdown is UNKNOWN; nothing removed");
+        if (!(await launchd.waitUnloaded())) throw new InstallerError("shutdown was not confirmed; nothing removed", { hint: `Try: launchctl bootout ${shQuote(launchd.target)}` });
       },
     });
   }
   const plist = fs.lstatSync(plistFile, { throwIfNoEntry: false });
+  const installed = (plist || purge) ? await installedPaths(ctx, plistFile) : null;
+  const installedHome = installed?.astraHome ?? ctx.astraHome;
   if (plist) {
     if (!plist.isFile() || !fs.readFileSync(plistFile, "utf8").includes(`<string>${label}</string>`)) {
       throw new InstallerError(`${plistFile} is not the LaunchAgent this installer writes; leaving it alone`);
@@ -46,20 +50,21 @@ export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui)
 
   const purgeFiles = purge
     ? [
-        ...Object.values(KEY_FILES).map((f) => path.join(ctx.astraHome, f)),
-        path.join(ctx.astraHome, "agent.stdout.log"),
-        path.join(ctx.astraHome, "agent.stderr.log"),
-        ctx.stateFile,
-        ctx.personalConfig,
+        ...Object.values(KEY_FILES).map((f) => path.join(installedHome, f)),
+        path.join(installedHome, "agent.stdout.log"),
+        path.join(installedHome, "agent.stderr.log"),
+        path.join(installedHome, "install-state.json"),
+        installed.personalConfig,
+        metadataFile(ctx),
       ].filter(present)
     : [];
   for (const f of purgeFiles) actions.push({ text: `DELETE ${f}`, run: () => fs.rmSync(f) });
   if (purge) {
     actions.push({
-      text: `remove ${ctx.astraHome} if it is then empty`,
+      text: `remove ${installedHome} if it is then empty`,
       run: () => {
         try {
-          fs.rmdirSync(ctx.astraHome);
+          fs.rmdirSync(installedHome);
         } catch {}
       },
       quiet: true,
@@ -74,12 +79,12 @@ export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui)
   ui.write("");
   ui.info("Kept (remove yourself if you want):");
   if (!purge) {
-    ui.info(`  keys and logs in ${ctx.astraHome}, ${ctx.personalConfig}  (./install-macos.sh uninstall --purge deletes them)`);
+    ui.info(`  keys and logs in ${installedHome}, ${ctx.personalConfig}  (./install-macos.sh uninstall --purge deletes them)`);
   }
-  ui.info(`  mcp-commander config ${ctx.commanderRemoteDir} (other mcp-commander setups may use it): rm -r ${shQuote(ctx.commanderRemoteDir)}`);
+  ui.info(`  mcp-commander config (other setups may use it): rm -r ${shQuote(installed?.commanderRemoteDir ?? ctx.commanderRemoteDir)}`);
   ui.info("  your workspace folder(s) and their files");
   ui.info("  build output: (cd mcp-commander && rm -rf node_modules dist) && (cd relay && rm -rf node_modules .wrangler)");
-  ui.info(`  the Worker in Cloudflare: cd relay && npx wrangler delete --name ${workerName}`);
+  ui.info(`  the Worker in Cloudflare: cd ${shQuote(ctx.relayDir)} && npx wrangler delete -c ${shQuote(ctx.personalConfig)} --name ${shQuote(workerName)}`);
   ui.info("  the Access application: Zero Trust → Access → Applications (disable or delete it to cut access at once)");
   for (const other of findOtherAgents(ctx.launchAgentsDir, label)) {
     ui.warn(`not touched: another Astra Bridge LaunchAgent ${other.label} (${other.file})`);
@@ -98,6 +103,13 @@ export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui)
   } else if (!(await ui.confirm("Stop and remove the agent?", { what: "uninstall the agent" }))) {
     throw new Checkpoint("nothing was changed");
   }
+  // Validate once more after user input, then preserve the locator for a later purge.
+  if (installed) {
+    const now = await installedPaths(ctx, plistFile);
+    if (JSON.stringify(now) !== JSON.stringify(installed)) throw new InstallerError("installation changed during confirmation; nothing removed");
+    if (plist && !purge) recordInstallation({ ...ctx, astraHome: installedHome, commanderRemoteDir: installed.commanderRemoteDir }, plistFile, fs.readFileSync(plistFile, "utf8"));
+  }
+  if (launchd.status().loaded !== st.loaded) throw new InstallerError("agent state changed during confirmation; nothing removed");
   for (const a of actions) {
     await a.run();
     if (!a.quiet) ui.ok(a.text.replace(/^(stop|remove|DELETE)/, (w) => ({ stop: "stopped", remove: "removed", DELETE: "deleted" })[w]));

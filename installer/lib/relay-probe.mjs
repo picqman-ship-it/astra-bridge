@@ -55,7 +55,7 @@ export async function probeAgentStatus(base, deviceId, clientKeyFile, { fetchImp
   try {
     key = createPrivateKey(fs.readFileSync(clientKeyFile));
   } catch {
-    return { ok: false, error: `cannot read ${clientKeyFile}` };
+    return { ok: false, failure: "configuration", error: `cannot read ${clientKeyFile}` };
   }
   const target = `/v1/device/${encodeURIComponent(deviceId)}/status`;
   try {
@@ -83,9 +83,9 @@ export async function probeAgentStatus(base, deviceId, clientKeyFile, { fetchImp
 /**
  * Classifies the answer to an anonymous POST /mcp.
  *
- *   verified        Cloudflare Access answered with its Managed OAuth 401 challenge
- *                   (WWW-Authenticate pointing at Access's OAuth metadata): the edge protects
- *                   /mcp and MCP clients such as ChatGPT can start the OAuth login.
+ *   challenge       An expected Bearer challenge was parsed. probeAccess must still verify
+ *                   the resource metadata and the expected team's issuer before reporting
+ *                   edge-protected. This never asserts an authenticated /mcp session.
  *   no-managed-oauth Access redirected to its browser login page: /mcp is protected, but
  *                   Managed OAuth is off, so ChatGPT cannot log in.
  *   not-configured  the Worker itself answered 503: its TEAM_DOMAIN / POLICY_AUD are missing,
@@ -98,21 +98,22 @@ export async function probeAgentStatus(base, deviceId, clientKeyFile, { fetchImp
  * `expectedTeamHost` (e.g. "myteam.cloudflareaccess.com") is compared with the team seen in a
  * login redirect when there is one.
  */
-export function classifyAccess({ status, headers }, { expectedTeamHost } = {}) {
+export function classifyAccess({ status, headers }, { expectedTeamHost, base } = {}) {
   const h = (name) => headers.get(name) ?? "";
   const challenge = h("www-authenticate");
   const location = h("location");
   // Access points at /.well-known/cloudflare-access-protected-resource/... (relay/README.md). The
   // Worker's own static-mode challenge points at /.well-known/oauth-protected-resource instead,
   // so it can never be mistaken for Access.
-  if (status === 401 && /cloudflare-?access/i.test(challenge)) {
-    return { state: "verified", detail: "Cloudflare Access answers /mcp with its Managed OAuth challenge" };
+  if (status === 401) {
+    const metadata = accessChallenge(challenge, base);
+    if (metadata) return { state: "challenge", metadata, detail: "Access Bearer challenge found; discovery metadata is not yet verified" };
   }
-  if ([301, 302, 303, 307].includes(status) && /\.cloudflareaccess\.com\/cdn-cgi\/access\/login/i.test(location)) {
-    let team = "";
-    try {
-      team = new URL(location).hostname;
-    } catch {}
+  let login;
+  try { login = new URL(location); } catch {}
+  if ([301, 302, 303, 307, 308].includes(status) && login?.protocol === "https:" && !login.username && !login.password && !login.port
+    && /^[a-z0-9-]+\.cloudflareaccess\.com$/.test(login.hostname) && login.pathname.startsWith("/cdn-cgi/access/login/")) {
+    const team = login.hostname;
     const mismatch = expectedTeamHost && team && team !== expectedTeamHost;
     return {
       state: mismatch ? "wrong-team" : "no-managed-oauth",
@@ -125,7 +126,52 @@ export function classifyAccess({ status, headers }, { expectedTeamHost } = {}) {
   if (status === 401 && !challenge) {
     return { state: "not-protected", detail: "the Worker itself answered 401: no Cloudflare Access application protects <host>/mcp yet (the Worker still refuses unauthenticated requests)" };
   }
-  return { state: "unknown", detail: `unexpected answer HTTP ${status}${challenge ? ` (WWW-Authenticate: ${challenge.slice(0, 80)})` : ""}` };
+  return { state: "unknown", detail: `unexpected answer HTTP ${status}${challenge ? " (invalid or unexpected authentication challenge)" : ""}` };
+}
+
+export function accessChallenge(challenge, base) {
+  const match = /^Bearer\s+(.+)$/i.exec(challenge);
+  if (!match || !base) return null;
+  const params = new Map();
+  let rest = match[1];
+  while (rest) {
+    const p = /^([a-z_][a-z0-9_]*)\s*=\s*(?:"([^"\\\r\n]*)"|([a-z0-9._~-]+))\s*(,\s*|$)/i.exec(rest);
+    if (!p || params.has(p[1].toLowerCase())) return null;
+    params.set(p[1].toLowerCase(), p[2] ?? p[3]);
+    rest = rest.slice(p[0].length);
+    if (p[4] && !rest) return null;
+  }
+  try {
+    const url = new URL(params.get("resource_metadata"));
+    if (url.protocol !== "https:" || url.origin !== new URL(base).origin || url.username || url.password || url.search || url.hash
+      || !/^\/\.well-known\/cloudflare-access-protected-resource\/(?:[a-zA-Z0-9._/-]*)$/.test(url.pathname)) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+async function accessMetadata(result, base, expectedTeamHost, fetchImpl) {
+  const invalid = (detail) => ({ state: "invalid-metadata", detail, authenticated: false });
+  if (!/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(expectedTeamHost ?? "")) return invalid("a valid TEAM_DOMAIN is required to verify Access discovery");
+  const get = async (url) => {
+    const response = await timedFetch(fetchImpl, url, { redirect: "manual" });
+    if (response.status !== 200) throw new Error("discovery endpoint unavailable");
+    return response.json();
+  };
+  const resource = await get(result.metadata);
+  const origin = new URL(base).origin;
+  const team = `https://${expectedTeamHost}`;
+  if (![origin, `${origin}/`, `${origin}/mcp`].includes(resource.resource) || resource.protected !== true) return invalid("Access resource metadata does not protect this relay");
+  if (!Array.isArray(resource.authorization_servers) || resource.authorization_servers.length !== 1
+    || ![team, `${team}/`].includes(resource.authorization_servers[0])
+    || (resource.team_domain !== undefined && resource.team_domain !== expectedTeamHost)) return { state: "wrong-team", detail: "Access metadata issuer does not match TEAM_DOMAIN", authenticated: false };
+  const issuer = await get(`${team}/.well-known/oauth-authorization-server`);
+  if (![team, `${team}/`, expectedTeamHost].includes(issuer.issuer)) return invalid("Access authorization-server issuer does not match TEAM_DOMAIN");
+  for (const [key, suffix] of [["authorization_endpoint", "authorization"], ["token_endpoint", "token"], ["registration_endpoint", "registration"]]) {
+    if (issuer[key] !== `${team}/cdn-cgi/access/oauth/${suffix}`) return invalid(`Access ${key} is not the expected team endpoint`);
+  }
+  if (!Array.isArray(issuer.response_types_supported) || !issuer.response_types_supported.includes("code")
+    || !Array.isArray(issuer.code_challenge_methods_supported) || !issuer.code_challenge_methods_supported.includes("S256")) return invalid("Access discovery does not advertise authorization code with PKCE S256");
+  return { state: "edge-protected", authenticated: false, detail: "Cloudflare Access edge protection and Managed OAuth discovery verified; user login and authenticated /mcp readiness still require the client" };
 }
 
 export async function probeAccess(base, { expectedTeamHost, fetchImpl = fetch } = {}) {
@@ -139,7 +185,8 @@ export async function probeAccess(base, { expectedTeamHost, fetchImpl = fetch } 
     try {
       await res.arrayBuffer();
     } catch {}
-    return classifyAccess(res, { expectedTeamHost });
+    const result = classifyAccess(res, { expectedTeamHost, base });
+    return result.state === "challenge" ? await accessMetadata(result, base, expectedTeamHost, fetchImpl) : result;
   } catch (err) {
     return { state: "unreachable", detail: reason(err) };
   }

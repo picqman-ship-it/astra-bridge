@@ -12,7 +12,8 @@ import { conflicts, createLaunchd, findOtherAgents, readPlist } from "./launchd.
 import { isVersionedPath } from "./node-path.mjs";
 import { MIN_NODE_MAJOR, checkPrereqs, parseVersion } from "./prereqs.mjs";
 import { probeAccess, probeAgentStatus, probeHealth } from "./relay-probe.mjs";
-import { run } from "./util.mjs";
+import { run, shQuote } from "./util.mjs";
+import { readState } from "./state.mjs";
 import { readPersonalConfig } from "./wrangler-config.mjs";
 
 /** The last meaningful status line the agent (or its mcp-commander child) logged. */
@@ -143,16 +144,18 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
       }
     }
     const st = launchd.status();
-    if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", `launchctl bootstrap gui/${ctx.uid} ${plistFile}   (or ./install-macos.sh)`);
+    if (st.loaded === null) add("agent", "launchd", "fail", `UNKNOWN: ${st.error}`);
+    else if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", `launchctl bootstrap gui/${ctx.uid} ${shQuote(plistFile)}   (or ./install-macos.sh)`);
     else if (st.state !== "running") add("agent", "launchd", "fail", `loaded but ${st.state ?? "not running"}, last exit ${st.lastExitCode ?? "?"}`, `See ${path.join(ctx.astraHome, "agent.stderr.log")}`);
     else add("agent", "launchd", "pass", `running, pid ${st.pid ?? "?"}`);
   }
+  if (readState(ctx).runtime?.pending) add("agent", "runtime changes", "fail", "restart/readiness verification pending", "./install-macos.sh");
   const ours = fs.existsSync(plistFile);
   for (const other of findOtherAgents(ctx.launchAgentsDir, label)) {
     const clash = ours && conflicts(other, v.relayUrl, v.deviceId);
     add("agent", "other agent", clash ? "fail" : "warn",
       `${other.label} (${other.file}) also runs an Astra Bridge agent for device ${other.deviceId ?? "?"}${clash ? "; both use the same relay and device, so they keep replacing each other's connection" : ""}`,
-      clash || !ours ? `If it is an older install: launchctl bootout gui/${ctx.uid}/${other.label}   and move the file out of ~/Library/LaunchAgents` : undefined);
+      clash || !ours ? `If it is an older install: launchctl bootout ${shQuote(`gui/${ctx.uid}/${other.label}`)}   and move the file out of ~/Library/LaunchAgents` : undefined);
   }
   // The log is shared by every agent using this ~/.astra-bridge, so only read it for ours.
   const event = ours ? lastAgentEvent(logTail(path.join(ctx.astraHome, "agent.stderr.log")) ?? "") : null;
@@ -169,14 +172,15 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
         add("relay", "agent connection", "fail", `signed status request refused: ${st.error}`,
           st.status === 401 || st.status === 403 ? "The deployed Worker has other keys or another device id: ./install-macos.sh --redeploy" : undefined);
       } else {
-        add("relay", "agent connection", st.agentConnected ? "pass" : "fail",
-          st.agentConnected ? `connected, mcp-commander healthy, last seen ${Math.round((st.lastSeenAgeMs ?? 0) / 1000)} s ago` : `not connected (mcpHealthy=${st.mcpHealthy})`,
-          st.agentConnected ? undefined : "Check the launchd and agent log lines above.");
+        const ready = st.agentConnected && st.mcpHealthy;
+        add("relay", "agent connection", ready ? "pass" : "fail",
+          ready ? `connected, mcp-commander healthy, last seen ${Math.round((st.lastSeenAgeMs ?? 0) / 1000)} s ago` : `not ready (agentConnected=${st.agentConnected}, mcpHealthy=${st.mcpHealthy})`,
+          ready ? undefined : "Check the launchd and agent log lines above.");
       }
     }
     if (h.ok && v.authMode === "access") {
       const a = await probeAccess(v.relayUrl, { expectedTeamHost: v.teamDomain ? new URL(v.teamDomain).hostname : undefined, fetchImpl });
-      const level = a.state === "verified" ? "pass" : a.state === "unreachable" || a.state === "unknown" ? "warn" : "fail";
+      const level = a.state === "edge-protected" ? "pass" : "fail";
       add("relay", "Cloudflare Access", level, a.detail, level === "pass" ? undefined : "./install-macos.sh guides the Access setup (relay/docs/SETUP-ACCESS.md)");
     }
   }

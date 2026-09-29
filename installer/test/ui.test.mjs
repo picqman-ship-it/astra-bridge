@@ -39,3 +39,21 @@ test("prompts: closed input and non-interactive mode end at a checkpoint, never 
   assert.equal(await createUi({ interactive: false, yes: true, out: new PassThrough() }).confirm("Deploy?"), true);
   assert.equal(await quiet.ask("Device id", { fallback: "my-mac" }), "my-mac");
 });
+
+test("--yes accepts ordinary TTY confirmations but never supplies typed consent", async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  const out = new PassThrough();
+  let text = "";
+  out.on("data", (chunk) => { text += chunk; });
+  const ui = createUi({ interactive: true, yes: true, input, out, color: false });
+  assert.equal(await ui.confirm("Restart?", { defaultYes: false }), true);
+  assert.equal(text, "", "ordinary confirmation does not read from the terminal");
+  const risky = ui.typed("Delete?", "delete");
+  input.write("yes\n");
+  assert.equal(await risky, false);
+  const explicit = ui.typed("Delete?", "delete");
+  input.write("delete\n");
+  assert.equal(await explicit, true);
+  ui.release();
+});

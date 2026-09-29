@@ -6,9 +6,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { runInherit, sha256 } from "./util.mjs";
+import { run as defaultRun, runInherit, sha256, writeFileAtomic } from "./util.mjs";
+import { treeHash } from "./state.mjs";
 
 const STAMP = ".astra-bridge-install.json";
+const BUILD_STAMP = ".astra-bridge-build.json";
 
 export function expectedStamp(pkgDir, arch = process.arch) {
   const lock = fs.readFileSync(path.join(pkgDir, "package-lock.json"), "utf8");
@@ -39,26 +41,31 @@ export function npmCi(ctx, pkgDir) {
   return true;
 }
 
-function newestMtime(dir, ext) {
-  let newest = 0;
-  const walk = (d) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (e.name.endsWith(ext)) newest = Math.max(newest, fs.statSync(p).mtimeMs);
-    }
+export function buildIdentity({ run = defaultRun, arch = process.arch, platform = process.platform, env = process.env } = {}) {
+  const query = (args) => {
+    const r = run("/usr/bin/xcrun", args, { env, timeoutMs: 15_000 });
+    return r.status === 0 ? r.stdout.trim() : "unavailable";
   };
-  if (fs.existsSync(dir)) walk(dir);
-  return newest;
+  return { arch, platform, node: process.version,
+    toolchain: platform === "darwin" ? [query(["--find", "swiftc"]), query(["swiftc", "--version"]), query(["--show-sdk-path"]), query(["--show-sdk-version"])] : [],
+    developerDir: env.DEVELOPER_DIR ?? "", sdkRoot: env.SDKROOT ?? "", target: env.MACOSX_DEPLOYMENT_TARGET ?? "12.0" };
+}
+
+export function buildFingerprint(commanderDir, identity = buildIdentity()) {
+  const inputs = ["package.json", "package-lock.json", ...fs.readdirSync(commanderDir).filter((f) => /^tsconfig.*\.json$/.test(f))]
+    .sort().map((f) => [f, sha256(fs.readFileSync(path.join(commanderDir, f)))]);
+  return sha256(JSON.stringify({ identity, inputs, trees: ["src", "native", "scripts"].map((d) => treeHash(path.join(commanderDir, d))) }));
 }
 
 /** null when mcp-commander's dist/ is current, else why it needs `npm run build`. */
-export function commanderBuildReason(commanderDir, { needGui = false } = {}) {
+export function commanderBuildReason(commanderDir, { needGui = false, identity = buildIdentity() } = {}) {
   const entry = path.join(commanderDir, "dist", "remote-stdio.js");
   if (!fs.existsSync(entry)) return "dist/ is missing";
-  const built = fs.statSync(entry).mtimeMs;
-  if (newestMtime(path.join(commanderDir, "src"), ".ts") > built + 1000) return "src/ is newer than dist/";
   if (needGui && !fs.existsSync(axHelperPath(commanderDir))) return "the GUI (Accessibility) helper has not been built";
+  let stamp;
+  try { stamp = JSON.parse(fs.readFileSync(path.join(commanderDir, "dist", BUILD_STAMP), "utf8")); } catch {}
+  if (stamp?.fingerprint !== buildFingerprint(commanderDir, identity)) return "build inputs, architecture or toolchain changed (or no build stamp)";
+  if (stamp.output !== treeHash(path.join(commanderDir, "dist"), { exclude: [BUILD_STAMP] })) return "build output changed";
   return null;
 }
 
@@ -67,5 +74,10 @@ export function axHelperPath(commanderDir) {
 }
 
 export function buildCommander(ctx) {
-  return runInherit(ctx.npm, ["run", "build"], { cwd: ctx.commanderDir, env: ctx.childEnv }) === 0;
+  const fingerprint = buildFingerprint(ctx.commanderDir);
+  if (runInherit(ctx.npm, ["run", "build"], { cwd: ctx.commanderDir, env: ctx.childEnv }) !== 0) return false;
+  if (fingerprint !== buildFingerprint(ctx.commanderDir)) return false;
+  writeFileAtomic(path.join(ctx.commanderDir, "dist", BUILD_STAMP), JSON.stringify({ fingerprint,
+    output: treeHash(path.join(ctx.commanderDir, "dist"), { exclude: [BUILD_STAMP] }) }));
+  return true;
 }

@@ -6,7 +6,7 @@
 // rest of the server is unaffected. A compile error in the source fails the build.
 // The binary is rebuilt only when the source (or compiler) changed; a .sha256 stamp records that.
 import { spawnSync } from 'node:child_process';
-import crypto from 'node:crypto';
+import { nativeFingerprint } from './native-fingerprint.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,9 @@ if (process.platform !== 'darwin') {
 const swiftc = spawnSync('xcrun', ['--find', 'swiftc'], { encoding: 'utf8' });
 const compiler = swiftc.status === 0 ? swiftc.stdout.trim() : null;
 if (!compiler) {
+  // Never leave a binary from an older source/toolchain/CPU looking current.
+  fs.rmSync(out, { force: true });
+  fs.rmSync(stamp, { force: true });
   log('WARNING: swiftc not found (install the Xcode Command Line Tools: xcode-select --install). GUI tools will report the helper as missing.');
   process.exit(0);
 }
@@ -33,7 +36,14 @@ if (!compiler) {
 const sdkRes = spawnSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' });
 const sdk = sdkRes.status === 0 ? sdkRes.stdout.trim() : '';
 const version = spawnSync(compiler, ['--version'], { encoding: 'utf8' }).stdout ?? '';
-const hash = crypto.createHash('sha256').update(fs.readFileSync(source)).update(version).update(sdk).digest('hex');
+const sdkVersion = spawnSync('xcrun', ['--show-sdk-version'], { encoding: 'utf8' }).stdout ?? '';
+const targetArch = { arm64: 'arm64', x64: 'x86_64' }[process.arch];
+if (!targetArch) throw new Error(`unsupported native architecture: ${process.arch}`);
+const flags = ['-O', '-target', `${targetArch}-apple-macosx${process.env.MACOSX_DEPLOYMENT_TARGET || '12.0'}`,
+  ...(sdk ? ['-sdk', sdk] : []), '-framework', 'ApplicationServices', '-framework', 'AppKit'];
+const hash = nativeFingerprint({ source: fs.readFileSync(source),
+  recipe: Buffer.concat([fs.readFileSync(fileURLToPath(import.meta.url)), fs.readFileSync(new URL('./native-fingerprint.mjs', import.meta.url))]),
+  compiler, version, sdk, sdkVersion, flags });
 
 if (fs.existsSync(out) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8').trim() === hash) {
   log('up to date');
@@ -42,8 +52,7 @@ if (fs.existsSync(out) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8')
 
 fs.mkdirSync(outDir, { recursive: true });
 const tmp = `${out}.${process.pid}.tmp`;
-const flags = ['-O', ...(sdk ? ['-sdk', sdk] : []), '-o', tmp, source, '-framework', 'ApplicationServices', '-framework', 'AppKit'];
-const res = spawnSync(compiler, flags, {
+const res = spawnSync(compiler, [...flags, '-o', tmp, source], {
   stdio: ['ignore', 'inherit', 'inherit'],
 });
 if (res.status !== 0) {

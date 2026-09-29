@@ -13,7 +13,11 @@ export function createLaunchd({ launchctl, uid, label, run = defaultRun }) {
     /** { loaded, state, pid, lastExitCode } from `launchctl print`. */
     status() {
       const r = exec(["print", target]);
-      if (r.status !== 0) return { loaded: false };
+      if (r.status !== 0) {
+        // Only a specific missing-service result proves absence. Errors fail closed.
+        if (!r.error && r.status === 113 && /Could not find service\b/.test(r.stderr ?? "")) return { loaded: false, state: "unloaded" };
+        return { loaded: null, state: "unknown", error: r.error || `launchctl print failed (${r.status ?? "no exit status"})` };
+      }
       const field = (name) => new RegExp(`^\\s*${name} = (.+)$`, "m").exec(r.stdout)?.[1].trim();
       const pid = Number(field("pid"));
       return {
@@ -28,7 +32,7 @@ export function createLaunchd({ launchctl, uid, label, run = defaultRun }) {
     bootstrap: (plist) => exec(["bootstrap", `gui/${uid}`, plist]),
     kickstart: () => exec(["kickstart", "-k", target]),
     async waitUnloaded(timeoutMs = 15_000) {
-      return Boolean(await poll(() => !api.status().loaded, { timeoutMs, intervalMs: 250 }));
+      return Boolean(await poll(() => api.status().loaded === false, { timeoutMs, intervalMs: 250 }));
     },
     async waitRunning(timeoutMs = 10_000) {
       return (await poll(() => {

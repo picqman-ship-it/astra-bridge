@@ -7,15 +7,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertSafeLaunchctl } from "./context.mjs";
+import { ownsDeployment, resolveAccount } from "./account.mjs";
 import { describeMode, loadCommanderConfig, protectsCheckout, runSetup, updateCommanderConfig } from "./commander.mjs";
 import { axHelperPath, buildCommander, commanderBuildReason, installReason, npmCi } from "./deps.mjs";
-import { parseJsonc } from "./jsonc.mjs";
+import { parseJsonc, setTopLevelString } from "./jsonc.mjs";
+import { recordInstallation } from "./install-metadata.mjs";
+import { lastAgentEvent } from "./doctor.mjs";
 import { KEY_FILES, fingerprint, inspectKeys, keyPresence } from "./keys.mjs";
 import { conflicts, createLaunchd, findOtherAgents } from "./launchd.mjs";
 import { stableNodePath } from "./node-path.mjs";
 import { blockers, checkPrereqs } from "./prereqs.mjs";
 import { probeAccess, probeAgentStatus, probeHealth } from "./relay-probe.mjs";
-import { deployHash, readState, writeState } from "./state.mjs";
+import { deployHash, pendingRuntime, readState, runtimeFingerprint, writeState } from "./state.mjs";
 import { Checkpoint, InstallerError, expandHome, run, runInherit, runTee, shQuote, sleep } from "./util.mjs";
 import { normalizeRelayUrl, normalizeTeamDomain, validateDeviceId, validateEmail, validatePolicyAud, validateWorkerName } from "./validate.mjs";
 import { applyUpdates, interpret, readPersonalConfig, writePersonalConfig } from "./wrangler-config.mjs";
@@ -45,7 +48,11 @@ function tail(text, n = 15) {
 }
 
 function wranglerEnv(ctx, s) {
-  return s.accountId ? { ...ctx.childEnv, CLOUDFLARE_ACCOUNT_ID: s.accountId } : ctx.childEnv;
+  if (!s.accountId) throw new InstallerError("no effective Cloudflare account selected");
+  const env = { ...ctx.childEnv, CLOUDFLARE_ACCOUNT_ID: s.accountId };
+  delete env.CF_ACCOUNT_ID;
+  delete env.CLOUDFLARE_ENV;
+  return env;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -88,6 +95,7 @@ async function dependencies(ctx, opts, ui, s) {
   const reason = commanderBuildReason(ctx.commanderDir, { needGui: s.needGui });
   if (reason) {
     ui.info(`mcp-commander: ${reason}; running npm run build …`);
+    pendingRuntime(ctx);
     ui.release();
     if (!buildCommander(ctx)) throw new InstallerError("mcp-commander build failed", { hint: "See the compiler output above." });
   }
@@ -146,6 +154,7 @@ async function workspace(ctx, opts, ui, s) {
       fs.chmodSync(backup, 0o600);
       ui.info(`backup: ${backup}`);
     }
+    pendingRuntime(ctx);
     const r = runSetup(ctx, { workspace: ws, terminal, gui, replace: existing.exists });
     if (r.status !== 0) {
       for (const d of createdDirs) {
@@ -155,7 +164,6 @@ async function workspace(ctx, opts, ui, s) {
         hint: "Pick a dedicated folder (not your home folder, not inside this checkout, ~/.ssh, ~/Library/LaunchAgents or ~/.astra-bridge) and re-run with --workspace <dir>.",
       });
     }
-    s.modeChanged = existing.exists;
   } else {
     if (existing.error) {
       throw new InstallerError(`${ctx.remoteConfigFile} is not valid: ${existing.error}`, {
@@ -176,6 +184,7 @@ async function workspace(ctx, opts, ui, s) {
     if (change.terminal || change.gui) await confirmRiskyModes(ui, { terminal: change.terminal, gui: change.gui });
     if (Object.keys(change).length) {
       try {
+        pendingRuntime(ctx);
         await updateCommanderConfig(ctx, existing.raw, change);
       } catch (err) {
         throw new InstallerError(`could not update remote.json: ${err.message}`, {
@@ -183,7 +192,6 @@ async function workspace(ctx, opts, ui, s) {
         });
       }
       if (change.protect) ui.ok(`protected this checkout in remote.json (${ctx.repoDir})`);
-      if ("terminal" in change || "gui" in change) s.modeChanged = true;
     }
   }
 
@@ -193,7 +201,8 @@ async function workspace(ctx, opts, ui, s) {
   ui.ok(`config: ${ctx.remoteConfigFile} (0600)`);
   ui.ok(`workspace: ${existing.cfg.roots.join(", ")}`);
   const risky = existing.cfg.trustedTerminal || existing.cfg.trustedGui;
-  (risky ? ui.warn : ui.ok)(`mode: ${describeMode(existing.cfg)}`);
+  (risky ? ui.warn : ui.ok)(`configured mode: ${describeMode(existing.cfg)}`);
+  if (readState(ctx).runtime?.pending) ui.warn("Runtime changes are pending; the running agent may still have its previous permissions until restart is verified.");
   if (!risky) ui.info("Terminal and GUI tools are off. Enable them later only if needed: ./install-macos.sh --enable-terminal / --enable-gui");
   if (existing.cfg.trustedGui) {
     ui.info("GUI tools need Accessibility permission: System Settings → Privacy & Security → Accessibility → allow");
@@ -210,6 +219,7 @@ async function keys(ctx, opts, ui, s) {
     });
   }
   if (presence === "none") {
+    pendingRuntime(ctx);
     const r = run(ctx.execPath, [ctx.keygen, "--dir", ctx.astraHome], { env: ctx.childEnv });
     if (r.status !== 0) throw new InstallerError(`keygen failed: ${tail(r.stderr, 5)}`);
     ui.ok(`created two Ed25519 key pairs in ${ctx.astraHome} (directory 0700, private keys 0600)`);
@@ -352,7 +362,8 @@ async function cloudflareLogin(ctx, opts, ui, s) {
   ui.ok(`logged in${who?.email ? ` as ${who.email}` : ""}${accounts.length ? `, ${accounts.length} account(s)` : ""}`);
 
   const state = readState(ctx);
-  s.accountId = opts.accountId ?? ctx.env.CLOUDFLARE_ACCOUNT_ID ?? state.accountId ?? null;
+  s.accountId = resolveAccount({ explicit: opts.accountId, env: ctx.env,
+    configured: readPersonalConfig(ctx.personalConfig).data?.account_id, remembered: state.accountId, accounts });
   if (!s.accountId && accounts.length > 1) {
     if (!ui.interactive) {
       throw new Checkpoint("your Cloudflare login has several accounts", {
@@ -367,23 +378,31 @@ async function cloudflareLogin(ctx, opts, ui, s) {
         return accounts[n - 1].id;
       },
     });
-    s.accountId = pick;
+    s.accountId = resolveAccount({ explicit: pick, accounts });
+  }
+  if (!s.accountId) throw new Checkpoint("Cloudflare did not identify an effective account", { instructions: ["Re-run with --account-id <id>. No Worker was inspected or deployed."] });
+  const personal = readPersonalConfig(ctx.personalConfig);
+  if (personal.error) throw new InstallerError(personal.error);
+  if (personal.data.account_id !== s.accountId) {
+    writePersonalConfig(ctx.personalConfig, setTopLevelString(personal.text, "account_id", s.accountId));
+    s.personal = readPersonalConfig(ctx.personalConfig);
   }
   if (s.accountId && s.accountId !== state.accountId) writeState(ctx, { accountId: s.accountId });
 }
 
 /** 'yes' | 'no' | 'unknown': whether a Worker with this name already exists in the account. */
 function workerExists(ctx, s, name) {
-  const r = run(ctx.wrangler, ["deployments", "list", "--name", name, "--json"], { cwd: ctx.relayDir, env: wranglerEnv(ctx, s), timeoutMs: 60_000 });
+  const r = run(ctx.wrangler, ["deployments", "list", "--name", name, "--json", "-c", ctx.personalConfig, "--env", ""], { cwd: ctx.relayDir, env: wranglerEnv(ctx, s), timeoutMs: 60_000 });
   if (r.status === 0) {
     try {
       const list = JSON.parse(r.stdout.slice(r.stdout.search(/[[{]/)));
-      return Array.isArray(list) && list.length > 0 ? "yes" : "no";
+      // A successful query (even no deployments yet) does not prove that the Worker is absent.
+      return Array.isArray(list) ? "yes" : "unknown";
     } catch {
       return "unknown";
     }
   }
-  return /10007|does not exist|not found/i.test(`${r.stdout}${r.stderr}`) ? "no" : "unknown";
+  return !r.error && /\[code: 10007\]/.test(`${r.stdout}${r.stderr}`) ? "no" : "unknown";
 }
 
 export function parseDeployUrl(output, workerName) {
@@ -396,12 +415,13 @@ async function deploy(ctx, opts, ui, s, { reason } = {}) {
   const values = s.personal.values;
   const state = readState(ctx);
   const hash = deployHash(ctx);
-  if (!reason && state.deploy?.hash === hash && state.deploy?.worker === values.workerName && !opts.redeploy) {
+  const owned = ownsDeployment(state.deploy, s.accountId, values.workerName);
+  if (!reason && state.deploy?.hash === hash && owned && !opts.redeploy) {
     s.relayUrl = values.relayUrl ?? state.deploy.url;
     ui.ok(`"${values.workerName}" is deployed and unchanged since ${state.deploy.at}`);
     return;
   }
-  if (state.deploy?.worker !== values.workerName) {
+  if (!owned) {
     const exists = workerExists(ctx, s, values.workerName);
     if (exists !== "no" && !opts.replaceExistingWorker) {
       ui.warn(exists === "yes"
@@ -421,11 +441,11 @@ async function deploy(ctx, opts, ui, s, { reason } = {}) {
     throw new Checkpoint("the relay was not deployed", { instructions: ["Re-run ./install-macos.sh when you are ready."] });
   }
   const env = wranglerEnv(ctx, s);
-  const dry = run(ctx.wrangler, ["deploy", "-c", ctx.personalConfig, "--dry-run"], { cwd: ctx.relayDir, env, timeoutMs: 180_000 });
+  const dry = run(ctx.wrangler, ["deploy", "-c", ctx.personalConfig, "--dry-run", "--env", ""], { cwd: ctx.relayDir, env, timeoutMs: 180_000 });
   if (dry.status !== 0) throw new InstallerError(`wrangler deploy --dry-run failed:\n${tail(dry.stdout + dry.stderr)}`);
   ui.info("running wrangler deploy …");
   ui.release();
-  const r = await runTee(ctx.wrangler, ["deploy", "-c", ctx.personalConfig], { cwd: ctx.relayDir, env });
+  const r = await runTee(ctx.wrangler, ["deploy", "-c", ctx.personalConfig, "--env", ""], { cwd: ctx.relayDir, env });
   if (r.status !== 0) {
     if (/workers\.dev subdomain/i.test(r.output)) {
       throw new Checkpoint("your Cloudflare account has no workers.dev subdomain yet", {
@@ -437,16 +457,16 @@ async function deploy(ctx, opts, ui, s, { reason } = {}) {
   const printed = parseDeployUrl(r.output, values.workerName);
   let url;
   if (values.relayUrl && !values.relayUrl.endsWith(".workers.dev")) url = values.relayUrl; // custom domain: keep
-  else url = printed ?? values.relayUrl;
+  else url = printed ?? (owned ? values.relayUrl : null);
   if (!url) {
     url = await ui.ask("Relay URL (the https://… address wrangler printed above)", { flag: "--relay-url", validate: normalizeRelayUrl });
   }
-  writeState(ctx, { deploy: { worker: values.workerName, hash, at: new Date().toISOString(), url } });
   if (url !== values.relayUrl) {
     writePersonalConfig(ctx.personalConfig, applyUpdates(fs.readFileSync(ctx.personalConfig, "utf8"), { relayUrl: url }));
     s.personal = readPersonalConfig(ctx.personalConfig);
     ui.info(`recorded the relay URL ${url} in the personal config`);
   }
+  writeState(ctx, { deploy: { accountId: s.accountId, worker: values.workerName, hash: deployHash(ctx), at: new Date().toISOString(), url } });
   s.relayUrl = url;
   ui.ok(`deployed ${url}`);
 }
@@ -474,7 +494,7 @@ function stripAstraEnv(env) {
   return Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith("ASTRA_")));
 }
 
-async function agent(ctx, opts, ui, s) {
+export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, wait = sleep, makeLaunchd = createLaunchd } = {}) {
   ui.heading(`8/${TOTAL} Mac agent (LaunchAgent)`);
   const relayUrl = s.relayUrl ?? s.personal.values.relayUrl;
   if (!relayUrl) {
@@ -501,11 +521,12 @@ async function agent(ctx, opts, ui, s) {
   const plist = renderPlist(template, resolved.values);
   const plistFile = path.join(ctx.launchAgentsDir, `${label}.plist`);
   const current = fs.existsSync(plistFile) ? fs.readFileSync(plistFile, "utf8") : null;
-  const launchd = createLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
+  const launchd = makeLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
   const st = launchd.status();
+  if (st.loaded === null) throw new InstallerError(`agent state is UNKNOWN: ${st.error}`);
 
   for (const other of findOtherAgents(ctx.launchAgentsDir, label)) {
-    const stopIt = [`  launchctl bootout gui/${ctx.uid}/${other.label}`, `  mv ${shQuote(other.file)} ~/Desktop/    (keeps it from starting at login; nothing is deleted)`];
+    const stopIt = [`  launchctl bootout ${shQuote(`gui/${ctx.uid}/${other.label}`)}`, `  mv ${shQuote(other.file)} ~/Desktop/    (keeps it from starting at login; nothing is deleted)`];
     if (conflicts(other, relayUrl, deviceId)) {
       // Not touched by the installer: it is not ours. Two agents would keep replacing each
       // other's connection to the relay, so stop here instead of making it worse.
@@ -516,9 +537,16 @@ async function agent(ctx, opts, ui, s) {
     ui.warn(`another Astra Bridge LaunchAgent is installed: ${other.label} (${other.file}, device ${other.deviceId ?? "?"}); it uses a different relay or device, so it is left alone`);
   }
 
-  // A redeployed Worker does not need an agent restart: the agent reconnects by itself.
-  const upToDate = current === plist && st.loaded && st.state === "running" && !s.modeChanged;
+  // Applied state describes verified runtime inputs, never just the files on disk.
+  const fingerprint = runtimeFingerprint(ctx, plist);
+  const runtime = readState(ctx).runtime;
+  const upToDate = current === plist && st.loaded === true && st.state === "running"
+    && runtime?.applied === fingerprint && runtime.pid === st.pid && !runtime.pending;
+  if (!upToDate) pendingRuntime(ctx, fingerprint);
+  const logFile = path.join(ctx.astraHome, "agent.stderr.log");
+  const oldLogSize = !upToDate ? (fs.statSync(logFile, { throwIfNoEntry: false })?.size ?? 0) : 0;
   if (upToDate) {
+    recordInstallation(ctx, plistFile, plist);
     ui.ok(`agent running (pid ${st.pid ?? "?"}), ${plistFile} up to date`);
   } else {
     ui.info(`LaunchAgent: ${plistFile}${current === null ? " (new)" : current === plist ? "" : " (will be replaced)"}`);
@@ -531,7 +559,7 @@ async function agent(ctx, opts, ui, s) {
       ? "Install the LaunchAgent and start the agent now? (it then starts automatically at every login)"
       : "Update/restart the agent now?";
     if (!(await ui.confirm(question, { what: "install and start the Mac agent" }))) {
-      throw new Checkpoint("the agent was not installed or restarted", { instructions: ["Nothing was written. Re-run ./install-macos.sh when you are ready."] });
+      throw new Checkpoint("the agent was not installed or restarted; runtime changes remain pending", { instructions: ["Re-run ./install-macos.sh to restart and verify the running agent."] });
     }
     if (current !== plist) {
       const args = [ctx.installAgent, "--install", "--relay-url", relayUrl, "--device-id", deviceId, "--node", node.path];
@@ -543,34 +571,47 @@ async function agent(ctx, opts, ui, s) {
       if (fs.readFileSync(plistFile, "utf8") !== plist) throw new InstallerError("the written LaunchAgent differs from the preview; not loading it");
       ui.ok(`wrote ${plistFile}`);
     }
+    recordInstallation(ctx, plistFile, plist);
     if (st.loaded) {
-      launchd.bootout();
-      if (!(await launchd.waitUnloaded())) throw new InstallerError("the previous agent did not stop within 15 s", { hint: `Try: launchctl bootout ${launchd.target}` });
+      const stopped = launchd.bootout();
+      if (stopped.status !== 0) throw new InstallerError("launchctl bootout failed; shutdown is UNKNOWN");
+      if (!(await launchd.waitUnloaded())) throw new InstallerError("the previous agent did not stop within 15 s", { hint: `Try: launchctl bootout ${shQuote(launchd.target)}` });
     }
-    launchd.enable();
+    if (launchd.enable().status !== 0) throw new InstallerError("launchctl enable failed");
     const b = launchd.bootstrap(plistFile);
     if (b.status !== 0) throw new InstallerError(`launchctl bootstrap failed: ${tail(b.stderr || b.stdout, 3)}`, { hint: `Run ./install-macos.sh doctor for details.` });
     const now = await launchd.waitRunning();
     if (now.state === "running") ui.ok(`agent started (pid ${now.pid ?? "?"})`);
-    else ui.warn(`agent is loaded but not running (state ${now.state ?? "?"}, last exit ${now.lastExitCode ?? "?"}); see ${path.join(ctx.astraHome, "agent.stderr.log")}`);
+    else throw new Checkpoint(`agent is not running (state ${now.state ?? "UNKNOWN"}, last exit ${now.lastExitCode ?? "?"}); runtime changes remain pending`);
   }
 
   if (opts.noNetworkChecks || opts.skipCloudflare) return ui.warn("relay connection not checked (network checks skipped)");
   const clientKey = path.join(ctx.astraHome, KEY_FILES.client);
   let status;
   for (let i = 0; i < 15; i++) {
-    status = await probeAgentStatus(relayUrl, deviceId, clientKey);
-    if (status.ok && status.agentConnected) break;
-    if (status.status === 401 || status.status === 403) break;
+    status = await probeStatus(relayUrl, deviceId, clientKey);
+    let log = "";
+    try {
+      const buffer = fs.readFileSync(logFile);
+      log = buffer.subarray(buffer.length < oldLogSize ? 0 : oldLogSize).toString("utf8");
+    } catch {}
+    if (lastAgentEvent(log)?.level === "fail") throw new InstallerError("the running agent reported an authentication or configuration failure; run ./install-macos.sh doctor");
+    if (status.failure === "configuration") throw new InstallerError("the client signing key cannot be read; runtime verification failed");
+    if (status.ok && status.agentConnected && status.mcpHealthy) break;
+    if (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status)) break;
     if (i === 0) ui.info("waiting for the agent to connect to the relay …");
-    await sleep(3000);
+    await wait(3000);
   }
-  if (status.ok && status.agentConnected) ui.ok("the relay reports the agent connected and mcp-commander healthy");
-  else if (status.status === 401 || status.status === 403) {
-    ui.warn(`the relay rejected this Mac's signed request (${status.error}): the deployed Worker has other public keys or another device id. Re-run with --redeploy.`);
-  } else {
-    ui.warn(`the relay does not report the agent connected yet (${status.ok ? `mcpHealthy=${status.mcpHealthy}` : status.error}). Check: ./install-macos.sh doctor`);
+  if (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status)) {
+    throw new InstallerError(`the relay rejected this Mac's signed request (${status.error}); check keys/device/config and re-run with --redeploy`);
   }
+  if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP readiness is not verified; runtime changes remain pending", { instructions: ["Check ./install-macos.sh doctor and re-run when the agent can connect."] });
+  const verified = launchd.status();
+  if (verified.loaded !== true || verified.state !== "running" || !verified.pid) throw new Checkpoint("agent stopped before readiness could be verified");
+  if (runtimeFingerprint(ctx, plist) !== fingerprint) throw new Checkpoint("runtime inputs changed during verification; re-run to apply them");
+  writeState(ctx, { runtime: { applied: fingerprint, pid: verified.pid, pending: null, verifiedAt: new Date().toISOString() } });
+  s.agentVerified = true;
+  ui.ok("the relay reports the agent connected and mcp-commander healthy");
 }
 
 function accessInstructions({ host, email }) {
@@ -619,14 +660,14 @@ async function access(ctx, opts, ui, s) {
   let result;
   for (let i = 0; i < 8; i++) {
     result = await probeAccess(s.relayUrl, { expectedTeamHost });
-    if (result.state === "verified") break;
+    if (result.state === "edge-protected") break;
     await sleep(3000);
   }
-  if (result.state === "verified") {
+  if (result.state === "edge-protected") {
     ui.ok(`verified: ${result.detail}`);
     ui.info(`Not verifiable from here: that your Access policy admits only ${v.email}. Check it in the dashboard;`);
     ui.info("the Worker also refuses every other identity (ACCESS_ALLOWED_EMAILS).");
-    s.accessVerified = true;
+    s.accessVerified = true; // Edge/discovery only; client authentication is a separate step.
     return;
   }
   const fix = {
@@ -636,6 +677,21 @@ async function access(ctx, opts, ui, s) {
     "wrong-team": ["TEAM_DOMAIN does not match the team protecting /mcp. Re-run with --team-domain <the right team>."],
   }[result.state] ?? ["Re-run ./install-macos.sh (or ./install-macos.sh doctor) in a minute."];
   throw new Checkpoint(`Access is not verified: ${result.detail}`, { instructions: fix });
+}
+
+export async function verifyCompletion(ctx, s, { probeStatus = probeAgentStatus, makeLaunchd = createLaunchd } = {}) {
+  if (!s.accessVerified || !s.agentVerified) throw new Checkpoint("setup is not finished: agent/MCP readiness and Cloudflare Access edge protection must both be verified");
+  const { readTemplate } = await import(pathToFileURL(ctx.installAgent).href);
+  const label = readTemplate().label;
+  const runtime = readState(ctx).runtime;
+  const st = makeLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label }).status();
+  const plist = fs.readFileSync(path.join(ctx.launchAgentsDir, `${label}.plist`), "utf8");
+  if (st.loaded !== true || st.state !== "running" || st.pid !== runtime?.pid || runtime?.pending
+    || runtimeFingerprint(ctx, plist) !== runtime?.applied) throw new Checkpoint("runtime changed after verification; re-run setup");
+  // Access setup can redeploy the relay after the first health check. Recheck before exit 0.
+  const status = await probeStatus(s.relayUrl, s.personal.values.deviceId, path.join(ctx.astraHome, KEY_FILES.client));
+  if (status.failure === "configuration" || (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status))) throw new InstallerError("final agent/MCP verification was rejected; check keys, device and deployed config");
+  if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP became unavailable before completion; re-run to verify readiness");
 }
 
 function finish(ctx, opts, ui, s) {
@@ -663,10 +719,11 @@ export async function install(ctx, opts, ui) {
   await deployStep(ctx, opts, ui, s);
   await agent(ctx, opts, ui, s);
   await access(ctx, opts, ui, s);
-  if (!s.accessVerified) {
+  if (!s.accessVerified || !s.agentVerified) {
     throw new Checkpoint("setup is not finished: Cloudflare Access has not been verified", {
       instructions: ["Re-run ./install-macos.sh without --skip-cloudflare / --no-network-checks to finish and verify it."],
     });
   }
+  await verifyCompletion(ctx, s);
   finish(ctx, opts, ui, s);
 }

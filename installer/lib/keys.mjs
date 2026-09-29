@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createPrivateKey, createPublicKey } from "node:crypto";
-import { mode, octal } from "./util.mjs";
+import { mode, octal, shQuote } from "./util.mjs";
 
 export const KEY_FILES = { agent: "agent-private.pem", client: "client-private.pem" };
 
@@ -22,7 +22,7 @@ export function inspectKeyDir(dir) {
   else if (!st.isDirectory()) problems.push(`${dir} is not a directory`);
   else {
     if (!ownedByMe(st)) problems.push(`${dir} is owned by another user`);
-    if (mode(st) & 0o077) problems.push(`${dir} has mode ${octal(st.mode)}; fix with: chmod 700 "${dir}"`);
+    if (mode(st) & 0o077) problems.push(`${dir} has mode ${octal(st.mode)}; fix with: chmod 700 ${shQuote(dir)}`);
   }
   return { exists: true, ok: problems.length === 0, problems };
 }
@@ -41,7 +41,7 @@ export function inspectKey(file) {
   }
   if (!ownedByMe(st)) problems.push(`${file} is owned by another user`);
   if (mode(st) & 0o077) {
-    problems.push(`${file} has mode ${octal(st.mode)} and may have been readable by others; fix with: chmod 600 "${file}" (and consider rotating the keys)`);
+    problems.push(`${file} has mode ${octal(st.mode)} and may have been readable by others; fix with: chmod 600 ${shQuote(file)} (and consider rotating the keys)`);
   }
   let publicKeyB64;
   try {

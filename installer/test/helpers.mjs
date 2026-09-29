@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const FAKE_ACCOUNT = "0123456789abcdef0123456789abcdef";
@@ -26,6 +26,7 @@ const FAKE_LAUNCHCTL = `#!/bin/sh
 echo "launchctl $*" >> "$FAKE_STATE_DIR/calls.log"
 case "$1" in
   print)
+    if [ -f "$FAKE_STATE_DIR/print-error" ]; then echo 'Operation not permitted' >&2; exit 1; fi
     if [ -f "$FAKE_STATE_DIR/loaded" ]; then
       printf 'gui/501/x = {\\n\\tstate = running\\n\\tpid = 4242\\n\\tlast exit code = (never exited)\\n}\\n'
       exit 0
@@ -34,18 +35,24 @@ case "$1" in
   bootstrap)
     if [ -f "$FAKE_STATE_DIR/loaded" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
     touch "$FAKE_STATE_DIR/loaded"; exit 0 ;;
-  bootout) rm -f "$FAKE_STATE_DIR/loaded"; exit 0 ;;
+  bootout)
+    if [ -f "$FAKE_STATE_DIR/bootout-error" ]; then echo 'Input/output error' >&2; exit 5; fi
+    rm -f "$FAKE_STATE_DIR/loaded"; exit 0 ;;
   *) exit 0 ;;
 esac
 `;
 
 const FAKE_WRANGLER = `#!/bin/sh
 echo "wrangler $*" >> "$FAKE_STATE_DIR/calls.log"
+echo "$1 account=\${CLOUDFLARE_ACCOUNT_ID-unset} env=\${CLOUDFLARE_ENV-unset}" >> "$FAKE_STATE_DIR/accounts.log"
 case "$1" in
   whoami)
     if [ -f "$FAKE_STATE_DIR/logged-out" ]; then echo '{"loggedIn":false}'; exit 1; fi
+    if [ -f "$FAKE_STATE_DIR/accounts.json" ]; then cat "$FAKE_STATE_DIR/accounts.json"; exit 0; fi
     echo '{"loggedIn":true,"authType":"OAuth Token","email":"owner@corp.test","accounts":[{"id":"${FAKE_ACCOUNT}","name":"Test"}]}' ;;
   deployments)
+    if [ -f "$FAKE_STATE_DIR/lookup-error" ]; then echo 'not found: permission denied' >&2; exit 1; fi
+    if [ -f "$FAKE_STATE_DIR/empty-deployments" ]; then echo '[]'; exit 0; fi
     if [ -f "$FAKE_STATE_DIR/worker-exists" ]; then echo '[{"id":"d1"}]'; exit 0; fi
     echo "X [ERROR] This Worker does not exist on your account. [code: 10007]" >&2; exit 1 ;;
   deploy)
@@ -72,9 +79,9 @@ function copyDir(src, dst, skip = () => false) {
 }
 
 /** A fresh sandbox; call cleanup() when done. */
-export function makeSandbox() {
+export function makeSandbox({ homeName = "home" } = {}) {
   const base = tmpDir();
-  const home = path.join(base, "home");
+  const home = path.join(base, homeName);
   const repo = path.join(base, "checkout");
   const state = path.join(base, "fake-state");
   const bin = path.join(base, "bin");
@@ -115,8 +122,9 @@ export function makeSandbox() {
     remoteDir: path.join(home, ".mcp-commander-remote"),
     personal: path.join(relay, "wrangler.personal.jsonc"),
     plist: path.join(home, "Library", "LaunchAgents", "com.example.astra-bridge-agent.plist"),
-    run(args, extraEnv = {}) {
-      const r = spawnSync(process.execPath, [path.join(repo, "installer", "astra-macos.mjs"), ...args], {
+    run(args, extraEnv = {}, { network = false } = {}) {
+      const preload = network ? ["--import", pathToFileURL(path.join(repo, "installer", "test", "fake-network.mjs")).href] : [];
+      const r = spawnSync(process.execPath, [...preload, path.join(repo, "installer", "astra-macos.mjs"), ...args], {
         env: { ...env, ...extraEnv },
         encoding: "utf8",
         input: "",

@@ -21,7 +21,7 @@ export function repoDirFromHere() {
 }
 
 export function createContext({ env = process.env, repoDir = repoDirFromHere(), execPath = process.execPath } = {}) {
-  const home = os.homedir();
+  const home = env.HOME ? path.resolve(env.HOME) : os.homedir();
   const abs = (p) => path.resolve(expandHome(p, home));
   const relayDir = path.join(repoDir, "relay");
   const commanderDir = path.join(repoDir, "mcp-commander");

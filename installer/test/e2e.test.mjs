@@ -82,13 +82,16 @@ test("full guided install in a sandbox: file-only, keys, personal config, deploy
   assert.equal(deployed.vars.POLICY_AUD, AUD);
   const bootstraps = (sb.calls().match(/launchctl bootstrap/g) ?? []).length;
 
-  // 4. Idempotent: nothing changed, so no deploy and no agent restart.
-  r = sb.run([...BASE, "--yes"]);
-  assert.equal(r.status, 3, r.out);
+  // 4. Verify readiness through a fake network; only then is a runtime marked applied.
+  r = sb.run(["--non-interactive", "--skip-deps", "--yes"], {}, { network: true });
+  assert.equal(r.status, 0, r.out);
+  const verifiedBootstraps = (sb.calls().match(/launchctl bootstrap/g) ?? []).length;
+  r = sb.run(["--non-interactive", "--skip-deps", "--yes"], {}, { network: true });
+  assert.equal(r.status, 0, r.out);
   assert.match(r.out, /is deployed and unchanged/);
   assert.match(r.out, /agent running/);
   assert.equal(sb.deploys(), 2);
-  assert.equal((sb.calls().match(/launchctl bootstrap/g) ?? []).length, bootstraps);
+  assert.equal((sb.calls().match(/launchctl bootstrap/g) ?? []).length, verifiedBootstraps);
 
   // 5. Doctor: read-only, passes offline; fails on a loose key mode without leaking the key.
   r = sb.run(["doctor", "--offline"]);
