@@ -20,6 +20,7 @@ import { stableNodePath } from "./node-path.mjs";
 import { blockers, checkPrereqs } from "./prereqs.mjs";
 import { probeAccess, probeAgentStatus, probeHealth } from "./relay-probe.mjs";
 import { deployHash, pendingRuntime, readState, runtimeFingerprint, writeState } from "./state.mjs";
+import { validRuntimePid, verifyRuntime } from "./runtime-verification.mjs";
 import { Checkpoint, InstallerError, expandHome, run, runInherit, runTee, shQuote, sleep } from "./util.mjs";
 import { normalizeRelayUrl, normalizeTeamDomain, validateDeviceId, validateEmail, validatePolicyAud, validateWorkerName } from "./validate.mjs";
 import { applyUpdates, interpret, readPersonalConfig, writePersonalConfig } from "./wrangler-config.mjs";
@@ -505,7 +506,7 @@ function stripAstraEnv(env) {
   return Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith("ASTRA_")));
 }
 
-export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, wait = sleep, makeLaunchd = createLaunchd } = {}) {
+export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, wait = sleep, makeLaunchd = createLaunchd, runtimeOptions = {} } = {}) {
   ui.heading(`8/${TOTAL} Mac agent (LaunchAgent)`);
   const relayUrl = s.relayUrl ?? s.personal.values.relayUrl;
   if (!relayUrl) {
@@ -549,10 +550,15 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
   }
 
   // Applied state describes verified runtime inputs, never just the files on disk.
-  const fingerprint = runtimeFingerprint(ctx, plist);
+  const fingerprint = runtimeFingerprint(ctx, plist, runtimeOptions);
   const runtime = readState(ctx).runtime;
-  const upToDate = current === plist && st.loaded === true && st.state === "running"
-    && runtime?.applied === fingerprint && runtime.pid === st.pid && !runtime.pending;
+  let proof = { ok: false };
+  if (current === plist) {
+    try { proof = verifyRuntime(ctx, { plist, plistFile, status: st, runtime }, runtimeOptions); }
+    catch { /* Unavailable evidence requires an ordinary restart and readiness probe. */ }
+  }
+  const upToDate = proof.ok;
+  let expectedPid = st.pid;
   if (!upToDate) pendingRuntime(ctx, fingerprint);
   const logFile = path.join(ctx.astraHome, "agent.stderr.log");
   const oldLogSize = !upToDate ? (fs.statSync(logFile, { throwIfNoEntry: false })?.size ?? 0) : 0;
@@ -592,7 +598,10 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
     const b = launchd.bootstrap(plistFile);
     if (b.status !== 0) throw new InstallerError(`launchctl bootstrap failed: ${tail(b.stderr || b.stdout, 3)}`, { hint: `Run ./install-macos.sh doctor for details.` });
     const now = await launchd.waitRunning();
-    if (now.state === "running") ui.ok(`agent started (pid ${now.pid ?? "?"})`);
+    if (now.loaded === true && now.state === "running" && validRuntimePid(now.pid)) {
+      expectedPid = now.pid;
+      ui.ok(`agent started (pid ${now.pid})`);
+    }
     else throw new Checkpoint(`agent is not running (state ${now.state ?? "UNKNOWN"}, last exit ${now.lastExitCode ?? "?"}); runtime changes remain pending`);
   }
 
@@ -618,8 +627,11 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
   }
   if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP readiness is not verified; runtime changes remain pending", { instructions: ["Check ./install-macos.sh doctor and re-run when the agent can connect."] });
   const verified = launchd.status();
-  if (verified.loaded !== true || verified.state !== "running" || !verified.pid) throw new Checkpoint("agent stopped before readiness could be verified");
-  if (runtimeFingerprint(ctx, plist) !== fingerprint) throw new Checkpoint("runtime inputs changed during verification; re-run to apply them");
+  if (verified.loaded !== true || verified.state !== "running" || !validRuntimePid(verified.pid) || verified.pid !== expectedPid) throw new Checkpoint("agent stopped or changed before readiness could be verified");
+  if (fs.readFileSync(plistFile, "utf8") !== plist || runtimeFingerprint(ctx, plist, runtimeOptions) !== fingerprint) throw new Checkpoint("runtime inputs changed during verification; re-run to apply them");
+  if (proof.restarted && !verifyRuntime(ctx, { plist, plistFile, status: verified, runtime: readState(ctx).runtime }, runtimeOptions).ok) {
+    throw new Checkpoint("restarted runtime changed during readiness verification; re-run to apply it");
+  }
   writeState(ctx, { runtime: { applied: fingerprint, pid: verified.pid, pending: null, verifiedAt: new Date().toISOString() } });
   s.agentVerified = true;
   ui.ok("the relay reports the agent connected and mcp-commander healthy");

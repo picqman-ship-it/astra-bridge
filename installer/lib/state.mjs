@@ -5,7 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { InstallerError, sha256, writeFileAtomic } from "./util.mjs";
+import { InstallerError, run as defaultRun, sha256, writeFileAtomic } from "./util.mjs";
 import { inspectKeyDir, inspectKeys } from "./keys.mjs";
 
 export function readState(ctx) {
@@ -45,15 +45,39 @@ export function treeHash(dir, { exclude = [] } = {}) {
   return sha256(JSON.stringify(parts));
 }
 
-export function runtimeFingerprint(ctx, plist) {
+/** Parse the supplied snapshot, not a second potentially different read of the plist. */
+export function runtimePlist(plist, { run = defaultRun } = {}) {
+  const result = run("/usr/bin/plutil", ["-convert", "json", "-o", "-", "-"], { input: plist, timeoutMs: 15_000 });
+  if (result.status !== 0 || result.error) throw new InstallerError("cannot parse runtime plist");
+  let data;
+  try { data = JSON.parse(result.stdout); } catch { throw new InstallerError("cannot parse runtime plist"); }
+  const node = data?.ProgramArguments?.[0];
+  if (typeof node !== "string" || !path.isAbsolute(node) || (data.Program && data.Program !== node)) {
+    throw new InstallerError("runtime plist does not identify an absolute Node executable");
+  }
+  return data;
+}
+
+export function runtimeFingerprint(ctx, plist, { run = defaultRun } = {}) {
   const keys = inspectKeys(ctx.astraHome);
   if (!keys.dir.ok || !keys.agent.ok || !keys.client.ok) throw new InstallerError("runtime keys changed or are invalid; cannot verify the running agent");
+  const node = fs.realpathSync(runtimePlist(plist, { run }).ProgramArguments[0]);
+  const result = run(node, ["--eval", "console.log(JSON.stringify([process.version, process.arch, process.platform]))"], {
+    timeoutMs: 15_000, env: { PATH: path.dirname(node), LC_ALL: "C", TZ: "UTC0" },
+  });
+  let identity;
+  try { identity = JSON.parse(result.stdout); } catch {}
+  if (result.status !== 0 || result.error || !Array.isArray(identity) || identity.length !== 3
+    || !/^v\d+\.\d+\.\d+$/.test(identity[0]) || !identity.slice(1).every((v) => typeof v === "string" && /^[a-z0-9_]+$/.test(v))) {
+    throw new InstallerError("cannot establish the plist Node runtime identity");
+  }
   return sha256(JSON.stringify({
     plist, publicKeys: [keys.agent.publicKeyB64, keys.client.publicKeyB64], config: fs.readFileSync(ctx.remoteConfigFile, "utf8"),
     agent: treeHash(path.join(ctx.relayDir, "src")),
     commander: treeHash(path.join(ctx.commanderDir, "dist")),
     dependencies: [ctx.relayDir, ctx.commanderDir].map((d) => sha256(fs.readFileSync(path.join(d, "package-lock.json")))),
-    node: [fs.realpathSync(ctx.execPath), process.version, process.arch, process.platform],
+    // Keep the saved fingerprint format compatible, but query the executable launchd uses.
+    node: [node, ...identity],
   }));
 }
 

@@ -9,10 +9,17 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pinBetaRelease } from "../pin-beta-release.mjs";
+import { BETA_RELAY_ORIGIN } from "../lib/beta-trust.mjs";
 
 export const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const FAKE_ACCOUNT = "0123456789abcdef0123456789abcdef";
 export const AUD = "a".repeat(32) + "0123456789abcdef0123456789abcdef";
+
+/** Unpinned trust template for disposable test releases, including tests of a pinned copy. */
+export function writeTestTrustTemplate(file) {
+  const source = fs.readFileSync(new URL("../lib/beta-trust.mjs", import.meta.url), "utf8");
+  fs.writeFileSync(file, source.replace(`export const BETA_RELAY_ORIGIN = ${JSON.stringify(BETA_RELAY_ORIGIN)};`, "export const BETA_RELAY_ORIGIN = null;"));
+}
 
 export function tmpDir(prefix = "astra-installer-") {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -57,7 +64,8 @@ case "$1" in
   print)
     if [ -f "$FAKE_STATE_DIR/print-error" ]; then echo 'Operation not permitted' >&2; exit 1; fi
     if [ -f "$FAKE_STATE_DIR/loaded" ]; then
-      printf 'gui/501/x = {\\n\\tstate = running\\n\\tpid = 4242\\n\\tlast exit code = (never exited)\\n}\\n'
+      pid=$(cat "$FAKE_STATE_DIR/pid" 2>/dev/null || echo 4242)
+      printf 'gui/501/x = {\\n\\tstate = running\\n\\tpid = %s\\n\\tlast exit code = (never exited)\\n}\\n' "$pid"
       exit 0
     fi
     echo "Could not find service" >&2; exit 113 ;;
@@ -123,6 +131,9 @@ export function makeSandbox({ homeName = "home" } = {}) {
   for (const d of [home, repo, state, bin]) fs.mkdirSync(d, { recursive: true });
 
   copyDir(path.join(REPO, "installer"), path.join(repo, "installer"), (n) => n === "node_modules");
+  // Also support testing an extracted, already-pinned release. Only the disposable
+  // sandbox gets the fake-network pin; the source release trust anchor stays intact.
+  writeTestTrustTemplate(path.join(repo, "installer", "lib", "beta-trust.mjs"));
   pinBetaRelease(repo, "https://astra-bridge-relay.example-sub.workers.dev");
   fs.copyFileSync(path.join(REPO, "install-macos.sh"), path.join(repo, "install-macos.sh"));
   fs.chmodSync(path.join(repo, "install-macos.sh"), 0o755);

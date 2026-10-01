@@ -11,7 +11,7 @@ import { pinBetaRelease } from "../pin-beta-release.mjs";
 import { readState, writeState } from "../lib/state.mjs";
 import { validateDeviceId } from "../lib/validate.mjs";
 import { interpret } from "../lib/wrangler-config.mjs";
-import { makeSandbox, tmpDir } from "./helpers.mjs";
+import { makeSandbox, tmpDir, writeTestTrustTemplate } from "./helpers.mjs";
 import { sqliteRegistry } from "../../relay/test/enrollment-sqlite.mjs";
 import { createInvite, revokeDevice } from "../../relay/scripts/beta-invite.mjs";
 const { redeemEnrollmentInvite } = await import("../../relay/src/beta-enrollment.ts");
@@ -123,7 +123,7 @@ test("release trust template fails closed; deterministic pin rejects forged arti
   for (const name of ["release-a", "release-b"]) {
     const root = path.join(ctx.home, name); fs.mkdirSync(path.join(root, "installer/lib"), { recursive: true });
     const target = path.join(root, "installer/lib/beta-trust.mjs");
-    fs.copyFileSync(new URL("../lib/beta-trust.mjs", import.meta.url), target);
+    writeTestTrustTemplate(target);
     pinBetaRelease(root, BASE); outputs.push(fs.readFileSync(target, "utf8"));
     assert.throws(() => pinBetaRelease(root, "https://attacker.example"), /already pinned/);
   }

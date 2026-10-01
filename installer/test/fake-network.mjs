@@ -13,6 +13,7 @@ globalThis.fetch = async (input, init = {}) => {
   });
   if (url.origin !== "https://astra-bridge-relay.example-sub.workers.dev") throw new Error("unexpected test URL");
   if (url.pathname === "/beta/enroll") {
+    fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR, "calls.log"), "network POST /beta/enroll\n");
     if (init.method !== "POST" || init.redirect !== "error" || !/^Bearer abi1_[a-f0-9]{64}$/.test(init.headers?.authorization ?? "")) throw new Error("invalid enrollment request");
     const body = JSON.parse(init.body);
     if (Object.keys(body).sort().join(",") !== "agentPublicKeyB64,deviceId,proof,version" || body.version !== 1) throw new Error("unexpected enrollment material");

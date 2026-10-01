@@ -13,7 +13,8 @@ import { isVersionedPath } from "./node-path.mjs";
 import { MIN_NODE_MAJOR, checkPrereqs, parseVersion } from "./prereqs.mjs";
 import { probeAccess, probeAgentStatus, probeHealth } from "./relay-probe.mjs";
 import { run, shQuote } from "./util.mjs";
-import { readState, runtimeFingerprint } from "./state.mjs";
+import { readState } from "./state.mjs";
+import { verifyRuntime } from "./runtime-verification.mjs";
 import { readPersonalConfig } from "./wrangler-config.mjs";
 import { offboardingState } from "./offboarding.mjs";
 import { probeBetaStatus } from "./beta-enrollment.mjs";
@@ -51,7 +52,7 @@ function logTail(file, bytes = 64 * 1024) {
   }
 }
 
-export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
+export async function doctor(ctx, { offline = false, fetchImpl = fetch, makeLaunchd = createLaunchd, runtimeOptions = {} } = {}) {
   const checks = [];
   const add = (group, name, level, detail, fix) => checks.push({ group, name, level, detail, ...(fix ? { fix: [].concat(fix) } : {}) });
 
@@ -108,6 +109,7 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
   // --- personal Cloudflare config
   const personal = readPersonalConfig(ctx.personalConfig);
   const beta = readState(ctx).betaEnrollment;
+  const recovery = beta ? "./install-macos.sh --beta-enroll" : "./install-macos.sh";
   const v = beta ? { relayUrl: beta.relayUrl, deviceId: beta.deviceId } : personal.values ?? {};
   if (beta) {
     const valid = beta.registered === true && beta.agentPublicKeyB64 === keys.agent.publicKeyB64
@@ -145,12 +147,12 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
     label = readTemplate().label;
   } catch {}
   const plistFile = path.join(ctx.launchAgentsDir, `${label}.plist`);
-  const launchd = createLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
+  const launchd = makeLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
   let runtimeStatus;
-  if (!fs.existsSync(plistFile)) add("agent", "LaunchAgent", "fail", `${plistFile} not installed`, "./install-macos.sh");
+  if (!fs.existsSync(plistFile)) add("agent", "LaunchAgent", "fail", `${plistFile} not installed`, recovery);
   else {
     const plist = readPlist(plistFile);
-    if (plist.error) add("agent", "LaunchAgent", "fail", `${plistFile} is not a valid plist: ${plist.error}`, "./install-macos.sh");
+    if (plist.error) add("agent", "LaunchAgent", "fail", `${plistFile} is not a valid plist: ${plist.error}`, recovery);
     else {
       const [nodePath, agentPath] = plist.data.ProgramArguments ?? [];
       const envv = plist.data.EnvironmentVariables ?? {};
@@ -161,33 +163,38 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
       if (!agentPath || !fs.existsSync(agentPath)) problems.push(`agent ${agentPath} is missing (checkout moved or deleted?)`);
       if (v.relayUrl && envv.ASTRA_RELAY_URL !== v.relayUrl) problems.push(`ASTRA_RELAY_URL ${envv.ASTRA_RELAY_URL} differs from the personal config (${v.relayUrl})`);
       if (v.deviceId && envv.ASTRA_DEVICE_ID !== v.deviceId) problems.push(`ASTRA_DEVICE_ID ${envv.ASTRA_DEVICE_ID} differs from the personal config (${v.deviceId})`);
-      if (problems.length) add("agent", "LaunchAgent", "fail", problems.join("; "), "./install-macos.sh (rewrites the LaunchAgent)");
+      if (problems.length) add("agent", "LaunchAgent", "fail", problems.join("; "), `${recovery} (rewrites the LaunchAgent)`);
       else {
         const versioned = isVersionedPath(nodePath);
         add("agent", "LaunchAgent", versioned ? "warn" : "pass", `${plistFile} → Node ${ver.raw} at ${nodePath}`,
-          versioned ? "This Node path changes when Node is upgraded or switched; re-run ./install-macos.sh afterwards." : undefined);
+          versioned ? `This Node path changes when Node is upgraded or switched; re-run ${recovery} afterwards.` : undefined);
       }
     }
     const st = launchd.status();
     runtimeStatus = st;
     if (st.loaded === null) add("agent", "launchd", "fail", `UNKNOWN: ${st.error}`);
-    else if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", "./install-macos.sh (restarts and verifies it; a revocation or uninstall keeps it disabled at login until then)");
+    else if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", `${recovery} (restarts and verifies it; a revocation or uninstall keeps it disabled at login until then)`);
     else if (st.state !== "running") add("agent", "launchd", "fail", `loaded but ${st.state ?? "not running"}, last exit ${st.lastExitCode ?? "?"}`, `See ${path.join(ctx.astraHome, "agent.stderr.log")}`);
     else add("agent", "launchd", "pass", `running, pid ${st.pid ?? "?"}`);
   }
   const runtime = readState(ctx).runtime;
   let runtimeVerified = false;
+  let restarted = false;
   let runtimeProblem = "applied runtime identity is missing or no longer running";
   try {
-    runtimeVerified = Boolean(runtimeStatus?.loaded === true && runtimeStatus.state === "running"
-      && runtimeStatus.pid && runtimeStatus.pid === runtime?.pid && !runtime?.pending
-      && runtime?.applied === runtimeFingerprint(ctx, fs.readFileSync(plistFile, "utf8")));
-    if (!runtimeVerified) runtimeProblem = "runtime/config inputs differ or restart/readiness verification is pending; running authority is UNKNOWN";
+    const proof = verifyRuntime(ctx, { status: runtimeStatus, runtime, plistFile, plist: fs.readFileSync(plistFile, "utf8") }, runtimeOptions);
+    runtimeVerified = proof.ok;
+    restarted = proof.restarted;
+    if (runtimeVerified && restarted) {
+      const current = launchd.status();
+      runtimeVerified = current.loaded === true && current.state === "running" && current.pid === runtimeStatus.pid;
+    }
+    if (!runtimeVerified) runtimeProblem = `${proof.reason ?? "process changed during runtime verification"}; running authority is UNKNOWN`;
   } catch (err) { runtimeProblem = `runtime inputs cannot be verified: ${err.message}; running authority is UNKNOWN`; }
-  if (runtimeStatus?.loaded === false) runtimeProblem = "the agent is not running; its next start is unverified until ./install-macos.sh restarts and checks it";
+  if (runtimeStatus?.loaded === false) runtimeProblem = `the agent is not running; its next start is unverified until ${recovery} restarts and checks it`;
   add("agent", "runtime changes", runtimeVerified ? "pass" : "fail",
-    runtimeVerified ? "running PID and applied runtime fingerprint match current inputs" : runtimeProblem,
-    runtimeVerified ? undefined : "./install-macos.sh (or --file-only to stop broader authority locally first)");
+    runtimeVerified ? restarted ? "restarted agent: applied fingerprint matches and process start follows every runtime input ctime" : "running PID and applied runtime fingerprint match current inputs" : runtimeProblem,
+    runtimeVerified ? undefined : beta ? recovery : `${recovery} (or --file-only to stop broader authority locally first)`);
   if (!runtimeVerified) {
     const mode = checks.find((c) => c.group === "workspace" && c.name === "access mode");
     if (mode) {
@@ -206,7 +213,7 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
   }
   // The log is shared by every agent using this ~/.astra-bridge, so only read it for ours.
   const event = ours ? lastAgentEvent(logTail(path.join(ctx.astraHome, "agent.stderr.log")) ?? "") : null;
-  if (event) add("agent", "agent log", event.level, event.line.slice(0, 200), event.why);
+  if (event) add("agent", "agent log", event.level, event.line.slice(0, 200), beta && event.why ? `Re-run ${recovery} or contact the operator` : event.why);
 
   // --- relay (network)
   if (offline) add("relay", "network checks", "warn", "skipped (--offline)");
