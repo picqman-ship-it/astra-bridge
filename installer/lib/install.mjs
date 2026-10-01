@@ -25,6 +25,7 @@ import { Checkpoint, InstallerError, expandHome, run, runInherit, runTee, shQuot
 import { normalizeRelayUrl, normalizeTeamDomain, validateDeviceId, validateEmail, validatePolicyAud, validateWorkerName } from "./validate.mjs";
 import { applyUpdates, interpret, readPersonalConfig, writePersonalConfig } from "./wrangler-config.mjs";
 import { agentFingerprint, betaInstallOptions, enrollBeta, probeBetaStatus, readInviteFile, recoverPendingBetaIdentity, takeInvite } from "./beta-enrollment.mjs";
+import { accountPairInstallOptions, pairAccount } from "./account-pairing.mjs";
 
 const TOTAL = 9;
 const DEFAULT_WORKER = "astra-bridge-relay";
@@ -133,9 +134,9 @@ async function workspace(ctx, opts, ui, s) {
   const wantGui = opts.enableGui ? true : opts.fileOnly ? false : undefined;
   let existing = await loadCommanderConfig(ctx);
 
-  const betaReduction = opts.betaEnroll && existing.exists && (existing.raw?.roots?.length !== 1
+  const hostedReduction = (opts.betaEnroll || opts.accountPair) && existing.exists && (existing.raw?.roots?.length !== 1
     || existing.raw?.trustedTerminal !== false || existing.raw?.trustedGui !== false);
-  if (!existing.exists || opts.reconfigure || betaReduction) {
+  if (!existing.exists || opts.reconfigure || hostedReduction) {
     const current = existing.raw?.roots?.[0];
     const chosen = opts.workspace ?? (ui.interactive
       ? await ui.ask("Workspace folder the AI may use (a dedicated, empty-ish folder)", { defaultValue: current ?? ctx.defaultWorkspace })
@@ -208,7 +209,7 @@ async function workspace(ctx, opts, ui, s) {
   const risky = existing.cfg.trustedTerminal || existing.cfg.trustedGui;
   (risky ? ui.warn : ui.ok)(`configured mode: ${describeMode(existing.cfg)}`);
   if (readState(ctx).runtime?.pending) ui.warn("Runtime changes are pending; active permissions are not verified until the agent restarts and readiness is checked.");
-  if (!risky && !opts.betaEnroll) ui.info("Terminal and GUI tools are off. Enable them later only if needed: ./install-macos.sh --enable-terminal / --enable-gui");
+  if (!risky && !opts.betaEnroll && !opts.accountPair) ui.info("Terminal and GUI tools are off. Enable them later only if needed: ./install-macos.sh --enable-terminal / --enable-gui");
   if (existing.cfg.trustedGui) {
     ui.info("GUI tools need Accessibility permission: System Settings → Privacy & Security → Accessibility → allow");
     ui.info(`the Node binary the agent runs (macOS asks the first time a GUI tool is used).`);
@@ -605,8 +606,9 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
     else throw new Checkpoint(`agent is not running (state ${now.state ?? "UNKNOWN"}, last exit ${now.lastExitCode ?? "?"}); runtime changes remain pending`);
   }
 
-  if (opts.noNetworkChecks || (opts.skipCloudflare && !opts.betaEnroll)) return ui.warn("relay connection not checked (network checks skipped)");
-  const clientKey = path.join(ctx.astraHome, opts.betaEnroll ? KEY_FILES.agent : KEY_FILES.client);
+  const hostedAccount = opts.betaEnroll || opts.accountPair;
+  if (opts.noNetworkChecks || (opts.skipCloudflare && !hostedAccount)) return ui.warn("relay connection not checked (network checks skipped)");
+  const clientKey = path.join(ctx.astraHome, hostedAccount ? KEY_FILES.agent : KEY_FILES.client);
   let status;
   for (let i = 0; i < 15; i++) {
     status = await probeStatus(relayUrl, deviceId, clientKey);
@@ -623,7 +625,13 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
     await wait(3000);
   }
   if (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status)) {
-    throw new InstallerError(opts.betaEnroll ? "beta agent verification rejected; contact the operator" : `the relay rejected this Mac's signed request (${status.error}); check keys/device/config and re-run with --redeploy`);
+    throw new InstallerError(
+      opts.betaEnroll
+        ? "beta agent verification rejected; contact the operator"
+        : opts.accountPair
+          ? "account-paired agent verification was rejected; re-run --account-pair or contact support"
+          : `the relay rejected this Mac's signed request (${status.error}); check keys/device/config and re-run with --redeploy`,
+    );
   }
   if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP readiness is not verified; runtime changes remain pending", { instructions: ["Check ./install-macos.sh doctor and re-run when the agent can connect."] });
   const verified = launchd.status();
@@ -773,7 +781,13 @@ export async function install(ctx, opts, ui) {
   }
   if (opts.legacyInvite) ui.warn("Legacy invite input carries no origin; the release relay pin still applies. Environment secrets may be visible to same-user processes; prefer --invite-file.");
   opts = betaInstallOptions(ctx, opts);
-  ui.danger(opts.betaEnroll ? ["Closed beta: the invited operator authorizes this device.", "File access is limited to your selected workspace. Terminal and GUI are disabled."] : SECURITY_BANNER);
+  opts = accountPairInstallOptions(ctx, opts);
+  const setupBanner = opts.betaEnroll
+    ? ["Closed beta: the invited operator authorizes this device.", "File access is limited to your selected workspace. Terminal and GUI are disabled."]
+    : opts.accountPair
+      ? ["Astra account pairing: this Mac will be bound to the account you authenticate in the browser.", "Pairing starts in file-only mode. Terminal and GUI control are NOT enabled by this step."]
+      : SECURITY_BANNER;
+  ui.danger(setupBanner);
   const s = {};
   if (opts.fileOnly || opts.reconfigure) await revokeLocalRuntime(ctx, ui, opts);
   else await retryOffboarding(ctx, ui);
@@ -808,6 +822,18 @@ export async function install(ctx, opts, ui) {
     ui.ok("agent connected and local MCP healthy; file-only mode verified");
     ui.info(`Confirm with the operator: device ${opts.deviceId}; agent SHA-256 ${agentFingerprint(s.keys.agent)}.`);
     ui.info("The operator must bind the connector to this redeemed device and confirmed fingerprint. Re-run with --beta-enroll to verify or resume; remove the invite file after verification.");
+    return;
+  }
+  if (opts.accountPair) {
+    invite = undefined;
+    await pairAccount(ctx, opts, ui, s);
+    await agent(ctx, opts, ui, s, { probeStatus: probeBetaStatus });
+    await verifyCompletion(ctx, s, { probeStatus: probeBetaStatus });
+    assertOffboardingConfirmed(ctx);
+    ui.heading("Astra account pairing complete");
+    ui.ok("this Mac is connected to your Astra account; file-only mode verified");
+    ui.info("Next: install/select the Astra plugin in ChatGPT. The plugin will route your authenticated ChatGPT session to this Mac automatically.");
+    ui.info("Terminal and GUI control remain disabled until a separate explicit permission elevation is implemented and approved.");
     return;
   }
   await personalConfig(ctx, opts, ui, s);
