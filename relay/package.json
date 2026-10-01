@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy -c wrangler.personal.jsonc",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "test": "node test/build.mjs src/tool-policy.ts src/mcp.ts src/beta-registry.ts src/agent-auth.ts src/oauth.ts src/oauth-store.ts src/access-registry.ts src/access-auth.ts src/index.ts && node --test test/*.test.mjs",
+    "test": "node test/build.mjs src/tool-policy.ts src/mcp.ts src/beta-registry.ts src/agent-auth.ts src/oauth.ts src/oauth-store.ts src/access-registry.ts src/access-auth.ts src/pairing.ts src/index.ts && node --test test/*.test.mjs",
     "smoke": "node src/smoke.mjs",
     "agent": "node src/agent.mjs",
     "deploy:dry-run": "wrangler deploy -c wrangler.personal.jsonc --dry-run"
