@@ -36,7 +36,7 @@ async function fixture(t) {
   } }] });
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql"]) {
     const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
     for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
   }
@@ -178,7 +178,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
   // Whole migration/operator artifacts go through D1 exec; no statement picking.
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql"]) {
     await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   await db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01');");
