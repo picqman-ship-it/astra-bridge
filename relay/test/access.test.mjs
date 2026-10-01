@@ -17,6 +17,7 @@ const AUD = "a".repeat(32) + "0123456789abcdef0123456789abcdef";
 const OWNER = "owner@example.com";
 const OPERATOR_TOKEN = "operator-bearer-token-which-is-long-enough-for-the-check";
 const DEVICE = "test-device";
+const DYNAMIC_DEVICE = "beta-11111111-2222-4333-8444-555555555555";
 const KID = "access-test-key-1";
 const TOOL_NAMES = [
   "get_config", "read_file", "read_multiple_files", "write_file", "create_directory",
@@ -253,6 +254,36 @@ test("authenticateAccessRequest reads only Cf-Access-Jwt-Assertion, never Author
   assert.equal(await authenticateAccessRequest(req({ "cf-access-jwt-assertion": jwt }), config, undefined, keys), null);
 });
 
+test("authenticateAccessRequest can route a verified identity to its registered device", async () => {
+  const config = accessConfig({ TEAM_DOMAIN: TEAM, POLICY_AUD: AUD });
+  const keys = createLocalJWKSet(jwks);
+  const jwt = await accessJwt();
+  const request = new Request("https://relay.example/mcp", {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": jwt },
+  });
+  const seen = [];
+  const principal = await authenticateAccessRequest(
+    request,
+    config,
+    undefined,
+    keys,
+    async (identity) => {
+      seen.push(identity);
+      return { ownerId: "user-01", deviceId: DYNAMIC_DEVICE, terminalEnabled: false };
+    },
+  );
+  assert.deepEqual(seen, [{
+    email: OWNER,
+    subject: "00000000-0000-4000-8000-000000000001",
+  }]);
+  assert.equal(principal.kind, "access");
+  assert.equal(principal.ownerId, "user-01");
+  assert.equal(principal.deviceId, DYNAMIC_DEVICE);
+  assert.equal(principal.terminalEnabled, false);
+  assert.deepEqual([...principal.scopes], ["astra.read", "astra.write"]);
+});
+
 // ---------------------------------------------------------------------------
 // Worker: static mode unchanged
 
@@ -297,6 +328,60 @@ test("Access mode accepts a valid assertion, verified through the team JWKS URL"
 
   // Access may forward the client's own Authorization header; it is ignored, not rejected.
   assert.equal((await mcp(env, "tools/list", { jwt, bearer: "x".repeat(40) })).status, 200);
+});
+
+test("Access registry routing sends a verified user only to its registered Mac", async () => {
+  const binds = [];
+  const statement = {
+    bind: (...values) => {
+      binds.push(values);
+      return statement;
+    },
+    first: async () => ({
+      owner_id: "user-01",
+      device_id: DYNAMIC_DEVICE,
+      terminal_enabled: 1,
+    }),
+    run: async () => ({ success: true }),
+  };
+  const registry = { prepare: () => statement };
+  const { env, relayCalls } = accessEnv({
+    ACCESS_DEVICE_ROUTING: "registry",
+    BETA_REGISTRY_ENABLED: "true",
+    BETA_REGISTRY: registry,
+  });
+  const listed = await mcp(env, "tools/list", { jwt: await accessJwt() });
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).result.tools.length, 27);
+  assert.deepEqual(binds, [[TEAM, "00000000-0000-4000-8000-000000000001"]]);
+  assert.deepEqual(relayCalls.map((call) => call.name), [DYNAMIC_DEVICE]);
+});
+
+test("Access registry routing fails closed without registry state or a bound device", async () => {
+  const jwt = await accessJwt();
+
+  for (const overrides of [
+    { ACCESS_DEVICE_ROUTING: "registry", BETA_REGISTRY_ENABLED: undefined, BETA_REGISTRY: undefined },
+    { ACCESS_DEVICE_ROUTING: "registry", BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: undefined },
+  ]) {
+    const { env, relayCalls } = accessEnv(overrides);
+    const response = await mcp(env, "tools/list", { jwt });
+    assert.equal(response.status, 503);
+    assert.deepEqual(relayCalls, []);
+  }
+
+  const statement = {
+    bind: () => statement,
+    first: async () => null,
+    run: async () => ({ success: true }),
+  };
+  const { env, relayCalls } = accessEnv({
+    ACCESS_DEVICE_ROUTING: "registry",
+    BETA_REGISTRY_ENABLED: "true",
+    BETA_REGISTRY: { prepare: () => statement },
+  });
+  await assertUnauthorized(await mcp(env, "tools/list", { jwt }));
+  assert.deepEqual(relayCalls, []);
 });
 
 test("Access mode rejects missing, malformed, wrong-aud, wrong-issuer, and forged assertions", async () => {
