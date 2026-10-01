@@ -262,6 +262,14 @@ describe('remote setup command', () => {
       assert.equal(repaired.status, 0);
       assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
 
+      assert.equal(cfg.trustedGui, false, 'GUI tools are off unless asked for');
+      const gui = spawnSync(process.execPath, [path.join(DIST, 'remote', 'setup.js'), '--remote-dir', path.join(base, 'r3'), '--root', work, '--trusted-gui'], { encoding: 'utf8' });
+      assert.equal(gui.status, 0, gui.stderr);
+      assert.match(gui.stdout, /Trusted GUI: ON/);
+      const guiCfg = JSON.parse(fs.readFileSync(path.join(base, 'r3', 'remote.json'), 'utf8'));
+      assert.equal(guiCfg.trustedGui, true);
+      assert.equal(guiCfg.trustedTerminal, false, '--trusted-gui does not imply the terminal');
+
       const tooBroad = spawnSync(process.execPath, [path.join(DIST, 'remote', 'setup.js'), '--remote-dir', path.join(base, 'r2'), '--root', '/'], { encoding: 'utf8' });
       assert.equal(tooBroad.status, 78);
       assert.match(tooBroad.stderr, /filesystem root|home directory/);

@@ -26,13 +26,20 @@ export async function validatePathNoFollow(requested: string, allowedDirectories
   const parent = path.dirname(absolute);
   if (parent === absolute) return validatePath(requested, allowedDirectories); // filesystem root
   const candidate = path.join(await resolveReal(parent), path.basename(absolute));
+  // Native realpath supplies the on-disk case for an existing non-link final component.
+  // Keep final links unfollowed, including dangling links.
+  const st = await fs.lstat(candidate).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return undefined;
+    throw err;
+  });
+  const comparison = st && !st.isSymbolicLink() ? await fs.realpath(candidate) : candidate;
 
   const dirs = allowedDirectories.map((d) => d.trim()).filter(Boolean);
   if (dirs.length === 0 || dirs.includes('/')) return candidate;
   for (const dir of dirs) {
     const dirAbs = path.resolve(expandHome(dir));
     const dirReal = await resolveReal(dirAbs).catch(() => dirAbs);
-    if (isWithin(candidate, dirReal)) return candidate;
+    if (isWithin(comparison, dirReal)) return candidate;
   }
   throw notAllowed(requested, dirs);
 }

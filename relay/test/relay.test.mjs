@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { sqliteRegistry } from "./enrollment-sqlite.mjs";
+import { createInvite } from "../scripts/beta-invite.mjs";
+import { betaId, rateBindings, signEnrollment, ORIGIN } from "./beta-test-helpers.mjs";
+import { signedHeaders as installerSignedHeaders } from "../../installer/lib/relay-probe.mjs";
 import worker, {
   AGENT_PING,
   AGENT_PONG,
@@ -187,6 +191,7 @@ function makeEnv(relays, clientKeyB64) {
   return {
     names,
     env: {
+      ...rateBindings(),
       DEVICE_RELAY: {
         getByName: relayFor,
         idFromName: (name) => ({ name }),
@@ -314,7 +319,7 @@ test("worker /mcp bounds actual body bytes and rejects batches", async () => {
   assert.equal(relays.size, 0);
 });
 
-test("worker /mcp fails closed for beta principals until closed-beta routing exists", async () => {
+test("worker /mcp fails closed for beta principals and preserves the personal bearer", async () => {
   const relays = new Map([[DEVICE, newRelay()]]);
   const ws = await connectAgent(relays.get(DEVICE).relay, { respond: commanderAgent });
   const { env, names } = makeEnv(relays);
@@ -332,8 +337,8 @@ test("worker /mcp fails closed for beta principals until closed-beta routing exi
 
   const response = await worker.fetch(mcpRequest(toolsCall("get_config", {}), { token: betaToken }), env);
   const body = await response.json();
-  assert.equal(body.result.isError, true);
-  assert.match(body.result.content[0].text, /\(agent_unavailable\)/);
+  assert.equal(response.status, 401);
+  assert.ok(body.error);
   assert.equal(names.length, 0, "the Durable Object was never invoked");
   assert.equal(ws.rpcs().length, 0);
 
@@ -626,6 +631,222 @@ function signedHeaders(privateKey, method, target, body = Buffer.alloc(0)) {
     "x-astra-signature": sign(null, Buffer.from(canonical), privateKey).toString("base64"),
   };
 }
+
+test("enrolled beta device: signed readiness, replay protection and personal RPC isolation", async t => {
+  const { db, registry } = sqliteRegistry(); t.after(() => db.close());
+  db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01')");
+  const invite = createInvite({ ownerId: "tester" }); db.exec(invite.sql);
+  const personal = keyPair(); const beta = keyPair(); const stranger = keyPair();
+  const relays = new Map();
+  const { env, names } = makeEnv(relays, personal.publicB64);
+  Object.assign(env, { BETA_REGISTRY: registry, BETA_REGISTRY_ENABLED: "true", BETA_ENROLLMENT_ENABLED: "true" });
+  const enroll = await worker.fetch(new Request("https://relay.example/beta/enroll", {
+    method: "POST", headers: { authorization: `Bearer ${invite.token}`, "content-type": "application/json" },
+    body: JSON.stringify(signEnrollment(ORIGIN, invite.token, betaId("new"), beta.publicB64, beta.privateKey)),
+  }), env);
+  assert.equal(enroll.status, 201); assert.deepEqual(await enroll.json(), { ok: true });
+  assert.equal(names.length, 0, "enrollment cannot invoke personal or beta tools");
+  const target = `/beta/device/${betaId("new")}/status`;
+  const get = (key, route = target) => worker.fetch(new Request(`https://relay.example${route}`, { headers: signedHeaders(key, "GET", route) }), env);
+  const headers = installerSignedHeaders(beta.privateKey, "GET", target);
+  const initial = await worker.fetch(new Request(`https://relay.example${target}`, { headers }), env);
+  assert.equal(initial.status, 200); assert.equal((await initial.json()).agentConnected, false);
+  assert.equal((await worker.fetch(new Request(`https://relay.example${target}`, { headers }), env)).status, 409);
+  const stale = installerSignedHeaders(beta.privateKey, "GET", target, Buffer.alloc(0), Date.now() - 61_000);
+  assert.equal((await worker.fetch(new Request(ORIGIN + target, { headers: stale }), env)).status, 401);
+  assert.equal((await worker.fetch(new Request(ORIGIN + target + "?device=other", { headers: installerSignedHeaders(beta.privateKey, "GET", target) }), env)).status, 400);
+  const malformedNonce = { ...installerSignedHeaders(beta.privateKey, "GET", target), "X-Astra-Nonce": "not-a-nonce" };
+  assert.equal((await worker.fetch(new Request(ORIGIN + target, { headers: malformedNonce }), env)).status, 401);
+  await connectAgent(relays.get(betaId("new")).relay);
+  assert.equal((await (await get(beta.privateKey)).json()).agentConnected, true);
+  assert.equal((await get(stranger.privateKey)).status, 403);
+  assert.equal((await get(beta.privateKey, `/beta/device/${DEVICE}/status`)).status, 403);
+  assert.equal((await get(beta.privateKey, `/v1/device/${betaId("new")}/status`)).status, 403);
+  const payload = Buffer.from(JSON.stringify({ action: "tools/list" }));
+  const rpc = `/v1/device/${betaId("new")}/rpc`;
+  assert.equal((await worker.fetch(new Request(`https://relay.example${rpc}`, {
+    method: "POST", headers: signedHeaders(beta.privateKey, "POST", rpc, payload), body: payload,
+  }), env)).status, 403);
+  assert.equal((await get(personal.privateKey, `/v1/device/${DEVICE}/status`)).status, 200);
+  db.prepare("UPDATE devices SET status = 'revoked', revoked_at = '2026-01-01' WHERE device_id = ?").run(betaId("new"));
+  assert.equal((await get(beta.privateKey)).status, 403);
+});
+
+test("enrollment never consumes personal bearer or alters personal MCP behavior", async t => {
+  const { db, registry } = sqliteRegistry(); t.after(() => db.close());
+  const { env } = makeEnv(new Map(), keyPair().publicB64);
+  Object.assign(env, { BETA_REGISTRY: registry, BETA_REGISTRY_ENABLED: "true", BETA_ENROLLMENT_ENABLED: "true" });
+  const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } };
+  const before = await (await worker.fetch(mcpRequest(init), env)).json();
+  const denied = await worker.fetch(new Request("https://relay.example/beta/enroll", {
+    method: "POST", headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: "{}",
+  }), env);
+  assert.equal(denied.status, 401);
+  assert.deepEqual(await (await worker.fetch(mcpRequest(init), env)).json(), before);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM devices").get().n, 0);
+  assert.equal(env.MCP_BEARER_TOKEN, TOKEN);
+});
+
+async function betaMcpFixture(t) {
+  const { db, registry } = sqliteRegistry();
+  t.after(() => db.close());
+  const relays = new Map();
+  const { env, names } = makeEnv(relays);
+  Object.assign(env, { BETA_REGISTRY: registry, BETA_REGISTRY_ENABLED: "true", BETA_ENROLLMENT_ENABLED: "true" });
+  const tokens = {};
+  for (const owner of ["alice", "bob"]) {
+    db.prepare("INSERT INTO users VALUES (?, ?, 'active', '2026-01-01')").run(owner, owner);
+    const invite = createInvite({ ownerId: owner });
+    db.exec(invite.sql);
+    const agentKey = keyPair();
+    const enrolled = await worker.fetch(new Request("https://relay.example/beta/enroll", {
+      method: "POST", headers: { authorization: `Bearer ${invite.token}`, "content-type": "application/json" },
+      body: JSON.stringify(signEnrollment(ORIGIN, invite.token, betaId(owner), agentKey.publicB64, agentKey.privateKey)),
+    }), env);
+    assert.equal(enrolled.status, 201);
+    // Separate operator authorization, never a token returned by enrollment.
+    tokens[owner] = `test-beta-${owner}-${randomBytes(32).toString("hex")}`;
+    db.prepare("INSERT INTO access_tokens VALUES (?, ?, ?, 'test', 'active', NULL, '2026-01-01', NULL)")
+      .run(createHash("sha256").update(tokens[owner]).digest("hex"), owner, betaId(owner));
+    const { relay } = newRelay();
+    relays.set(betaId(owner), { relay });
+    await connectAgent(relay, { respond: payload => payload.action === "tools/list"
+      ? { result: { tools: [...DOWNSTREAM_TOOLS, ...["list_windows", "inspect_ui", "press_element", "set_element_value"].map(name => ({ name, inputSchema: { type: "object" } }))] } }
+      : { result: { content: [{ type: "text", text: `${owner}:${payload.name}` }] } } });
+  }
+  const call = (message, token = tokens.alice, options = {}) => worker.fetch(mcpRequest(message, {
+    url: "https://relay.example/beta/mcp", token, ...options,
+  }), env);
+  return { db, env, names, tokens, call };
+}
+
+test("/beta/mcp routes enrolled principals only to their own device despite caller selectors", async t => {
+  const { call, names, tokens } = await betaMcpFixture(t);
+  for (const owner of ["alice", "bob"]) {
+    const res = await call(toolsCall("read_file", { path: "note.txt", deviceId: DEVICE, ownerId: "other" }), tokens[owner], {
+      url: `https://relay.example/beta/mcp?deviceId=${DEVICE}`,
+      headers: { "x-astra-device-id": DEVICE, "mcp-session-id": "other-owner-session" },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).result.content, [{ type: "text", text: `${owner}:read_file` }]);
+  }
+  assert.deepEqual(names, [betaId("alice"), betaId("bob")]);
+});
+
+test("/beta/mcp retains file-only tool filtering and mutation idempotency checks", async t => {
+  const { call, names } = await betaMcpFixture(t);
+  const listed = await (await call({ jsonrpc: "2.0", id: 1, method: "tools/list" })).json();
+  const visible = listed.result.tools.map(tool => tool.name);
+  assert.deepEqual(visible.sort(), ["get_config", "read_file", "read_multiple_files", "write_file", "create_directory", "list_directory", "move_file", "get_file_info", "start_search", "get_more_search_results", "stop_search", "list_searches", "edit_block"].sort());
+  for (const tool of ["start_process", "read_process_output", "interact_with_process", "force_terminate", "list_sessions", "list_processes", "kill_process", "job_start", "job_status", "job_list", "job_logs", "job_cancel", "list_windows", "inspect_ui", "press_element", "set_element_value", "set_config_value", "get_recent_tool_calls", "get_usage_stats"]) {
+    assert.ok(!visible.includes(tool), tool);
+    const before = names.length;
+    assert.equal((await (await call(toolsCall(tool, { idempotencyKey: "valid-test-key" }))).json()).result.isError, true, tool);
+    assert.equal(names.length, before, `${tool} must not reach a device`);
+  }
+  const denied = await (await call(toolsCall("write_file", { path: "note.txt", content: "x" }))).json();
+  assert.equal(denied.result.isError, true);
+  assert.match(denied.result.content[0].text, /idempotency_key_required/);
+});
+
+test("/beta/mcp rejects personal and anonymous credentials; beta never dispatches through /mcp", async t => {
+  const { call, names, env, tokens } = await betaMcpFixture(t);
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+  for (const token of [null, TOKEN, "invalid-".repeat(8)]) {
+    assert.equal((await call(message, token, { headers: { "cf-access-jwt-assertion": "forged-owner-assertion" } })).status, 401);
+  }
+  const personalRoute = await worker.fetch(mcpRequest(message, { token: tokens.alice }), env);
+  assert.ok((await personalRoute.json()).error);
+  assert.deepEqual(names, []);
+  // The beta route remains independent of the owner's Access authentication mode.
+  env.MCP_AUTH_MODE = "access";
+  assert.equal((await call(message, TOKEN)).status, 401);
+  assert.equal((await call(message)).status, 200);
+  assert.deepEqual(names, [betaId("alice")]);
+});
+
+test("/beta/mcp is opt-in and does not depend on the separate enrollment flag", async t => {
+  const { call, env, names } = await betaMcpFixture(t);
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+  for (const flag of [undefined, "false", "TRUE"]) {
+    env.BETA_REGISTRY_ENABLED = flag;
+    assert.equal((await call(message)).status, 404);
+  }
+  env.BETA_REGISTRY_ENABLED = "true";
+  const registry = env.BETA_REGISTRY;
+  delete env.BETA_REGISTRY;
+  assert.equal((await call(message)).status, 404);
+  assert.deepEqual(names, []);
+  env.BETA_REGISTRY = registry;
+  env.BETA_ENROLLMENT_ENABLED = "false";
+  assert.equal((await call(message)).status, 200);
+  assert.deepEqual(names, [betaId("alice")]);
+});
+
+test("/beta/mcp rechecks token, owner and device revocation or expiry on every request", async t => {
+  const { call, db, names } = await betaMcpFixture(t);
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+  for (const [deny, restore] of [
+    ["UPDATE access_tokens SET status = 'revoked'", "UPDATE access_tokens SET status = 'active'"],
+    ["UPDATE access_tokens SET revoked_at = '2026-01-01'", "UPDATE access_tokens SET revoked_at = NULL"],
+    ["UPDATE access_tokens SET expires_at = '2026-01-02'", "UPDATE access_tokens SET expires_at = NULL"],
+    ["UPDATE users SET status = 'disabled'", "UPDATE users SET status = 'active'"],
+    ["UPDATE devices SET status = 'revoked'", "UPDATE devices SET status = 'active'"],
+    ["UPDATE devices SET revoked_at = '2026-01-01'", "UPDATE devices SET revoked_at = NULL"],
+  ]) {
+    assert.equal((await call(message)).status, 200);
+    const before = names.length;
+    db.exec(deny);
+    assert.equal((await call(message)).status, 401, deny);
+    assert.equal(names.length, before);
+    db.exec(restore);
+  }
+  assert.ok(names.every(name => name === betaId("alice")));
+});
+
+test("/beta/mcp refuses all reserved personal IDs even in misprovisioned registry rows", async t => {
+  const { call, db, env, names } = await betaMcpFixture(t);
+  Object.assign(env, { AGENT_DEVICE_ID: "personal-agent", CLIENT_DEVICE_ID: "personal-client", MCP_DEVICE_ID: "personal-mcp" });
+  for (const deviceId of [env.AGENT_DEVICE_ID, env.CLIENT_DEVICE_ID, env.MCP_DEVICE_ID]) {
+    db.prepare("INSERT INTO devices VALUES (?, 'alice', ?, 'active', 0, '2026-01-01', NULL)").run(deviceId, keyPair().publicB64);
+    db.prepare("UPDATE access_tokens SET device_id = ? WHERE owner_id = 'alice'").run(deviceId);
+    assert.equal((await call({ jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401);
+  }
+  assert.deepEqual(names, []);
+});
+
+test("/beta/mcp registry failure returns a fixed error without personal fallback", async t => {
+  const { call, env, names } = await betaMcpFixture(t);
+  env.BETA_REGISTRY = { prepare() { throw new Error("private registry connection details"); } };
+  const response = await call({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "service_unavailable" });
+  assert.deepEqual(names, []);
+});
+
+test("beta tool audit records only metadata, including policy denials; failures never break requests", async t => {
+  const { db, env, tokens } = await betaMcpFixture(t);
+  const pending = [];
+  const call = name => worker.fetch(mcpRequest(toolsCall(name, { secret: "never-audit-this-content", path: "private-name" }), {
+    url: ORIGIN + "/beta/mcp", token: tokens.alice,
+  }), env, { waitUntil(p) { pending.push(p); } });
+  assert.equal((await call("read_file")).status, 200);
+  assert.equal((await (await call("get_recent_tool_calls")).json()).result.isError, true);
+  assert.equal((await (await call("write_file")).json()).result.isError, true);
+  assert.equal((await (await call("unreviewed-name-containing-private-data")).json()).result.isError, true);
+  await Promise.all(pending);
+  const rows = db.prepare("SELECT * FROM audit_events ORDER BY created_at").all();
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map(r => r.outcome), ["succeeded", "denied", "failed", "denied"]);
+  assert.equal(rows[3].tool_name, "unapproved_tool");
+  assert.ok(rows.every(r => r.owner_id === "alice" && r.device_id === betaId("alice") && r.duration_ms >= 0));
+  assert.doesNotMatch(JSON.stringify(rows), /never-audit-this-content|private-name|arguments|authorization|unreviewed-name-containing-private-data/);
+  db.exec("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'private database details'); END");
+  const response = await call("read_file");
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).result.content[0].text, "alice:read_file");
+  await Promise.all(pending);
+});
 
 test("signed path counts actual body bytes before signature verification", async () => {
   const { privateKey, publicB64 } = keyPair();

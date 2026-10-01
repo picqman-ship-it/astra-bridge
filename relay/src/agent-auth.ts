@@ -1,7 +1,10 @@
 import { resolveActiveBetaDevice, type D1DatabaseLike } from "./beta-registry";
+import { isBetaDeviceId, isPersonalDeviceId } from "./beta-identity";
 
 export type AgentAuthEnv = {
   AGENT_DEVICE_ID: string;
+  CLIENT_DEVICE_ID?: string;
+  MCP_DEVICE_ID?: string;
   AGENT_PUBLIC_KEY_B64?: string;
   BETA_REGISTRY_ENABLED?: string;
   BETA_REGISTRY?: D1DatabaseLike;
@@ -26,11 +29,12 @@ export async function resolveAgentAuthentication(
   deviceId: string,
 ): Promise<AgentAuthentication | null> {
   if (deviceId === env.AGENT_DEVICE_ID) {
-    return env.AGENT_PUBLIC_KEY_B64
+    return isPersonalDeviceId(deviceId, env.BETA_REGISTRY_ENABLED === "true") && env.AGENT_PUBLIC_KEY_B64
       ? { deviceId, publicKeyB64: env.AGENT_PUBLIC_KEY_B64, beta: false }
       : null;
   }
-  if (!betaRegistryEnabled(env)) return null;
+  if (deviceId === env.CLIENT_DEVICE_ID || deviceId === env.MCP_DEVICE_ID
+    || !isBetaDeviceId(deviceId) || !betaRegistryEnabled(env)) return null;
   const device = await resolveActiveBetaDevice(env.BETA_REGISTRY!, deviceId);
   return device
     ? { deviceId: device.deviceId, publicKeyB64: device.agentPublicKeyB64, beta: true }

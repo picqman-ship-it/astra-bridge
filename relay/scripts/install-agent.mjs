@@ -282,7 +282,7 @@ function printUninstall(label) {
       `  rm ${shQuote(target)}`,
       "",
       "Keys and logs in ~/.astra-bridge are kept. Delete them yourself if you no longer need",
-      "them, and remove the public keys from relay/wrangler.jsonc (or delete the Worker).",
+      "them, and remove the public keys from relay/wrangler.personal.jsonc (or delete the Worker).",
       "",
     ].join("\n"),
   );

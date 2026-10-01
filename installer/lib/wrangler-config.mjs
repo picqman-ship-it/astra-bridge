@@ -1,0 +1,159 @@
+// The personal Worker config (relay/wrangler.personal.jsonc, gitignored), created from the
+// committed template relay/wrangler.jsonc. Only the values below are ever written; every other
+// line of the file, including comments and settings the user added, is left untouched.
+
+import fs from "node:fs";
+import { parseJsonc, setStringProperty } from "./jsonc.mjs";
+import { shQuote, writeFileAtomic } from "./util.mjs";
+import {
+  isPlaceholder,
+  normalizeRelayUrl,
+  normalizeTeamDomain,
+  validateDeviceId,
+  validateEmail,
+  validatePolicyAud,
+  validatePublicKeyB64,
+  validateWorkerName,
+} from "./validate.mjs";
+
+export const FIELDS = {
+  workerName: ["name"],
+  agentKey: ["vars", "AGENT_PUBLIC_KEY_B64"],
+  clientKey: ["vars", "CLIENT_PUBLIC_KEY_B64"],
+  agentDeviceId: ["vars", "AGENT_DEVICE_ID"],
+  clientDeviceId: ["vars", "CLIENT_DEVICE_ID"],
+  mcpDeviceId: ["vars", "MCP_DEVICE_ID"],
+  oauthIssuer: ["vars", "OAUTH_ISSUER"],
+  oauthResource: ["vars", "OAUTH_RESOURCE"],
+  authMode: ["vars", "MCP_AUTH_MODE"],
+  teamDomain: ["vars", "TEAM_DOMAIN"],
+  policyAud: ["vars", "POLICY_AUD"],
+  allowedEmails: ["vars", "ACCESS_ALLOWED_EMAILS"],
+};
+
+function get(data, path) {
+  return path.reduce((obj, key) => (obj && typeof obj === "object" ? obj[key] : undefined), data);
+}
+
+/** Returns `fn(raw)` or null when the value is a placeholder or invalid. */
+function valid(fn, raw) {
+  if (isPlaceholder(raw)) return null;
+  try {
+    return fn(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the personal config and interprets it. `values` holds each managed field only when it
+ * is a real, valid value (placeholders and invalid values are null), so callers can tell
+ * "configured" from "still to do" without re-validating.
+ */
+export function readPersonalConfig(file) {
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!st) return { exists: false };
+  const error = personalConfigProblem(file, st);
+  if (error) return { exists: true, error };
+  const text = fs.readFileSync(file, "utf8");
+  let data;
+  try {
+    data = parseJsonc(text);
+  } catch (err) {
+    return { exists: true, text, error: `cannot parse ${file}: ${err.message}` };
+  }
+  return { exists: true, text, data, ...interpret(data) };
+}
+
+export function personalConfigProblem(file, st, uid = process.getuid?.()) {
+  if (!st.isFile()) return `${file} must be a regular file (no symbolic links)`;
+  if (uid !== undefined && st.uid !== uid) return `${file} is owned by another user`;
+  if ((st.mode & 0o777) !== 0o600) return `${file} must have mode 0600; fix with: chmod 600 ${shQuote(file)}`;
+  return null;
+}
+
+export function interpret(data) {
+  const raw = Object.fromEntries(Object.entries(FIELDS).map(([k, p]) => [k, get(data, p)]));
+  const rawDeviceIds = [raw.agentDeviceId, raw.clientDeviceId, raw.mcpDeviceId];
+  const betaEnabled = data.vars?.BETA_REGISTRY_ENABLED === "true";
+  const deviceIds = rawDeviceIds.map((v) => valid(value => validateDeviceId(value, betaEnabled), v));
+  const deviceId = deviceIds[0];
+  const relayUrl = valid(normalizeRelayUrl, raw.oauthIssuer);
+  const values = {
+    workerName: valid(validateWorkerName, raw.workerName),
+    agentKey: valid(validatePublicKeyB64, raw.agentKey),
+    clientKey: valid(validatePublicKeyB64, raw.clientKey),
+    deviceId,
+    relayUrl,
+    authMode: typeof raw.authMode === "string" ? raw.authMode.trim().toLowerCase() : "",
+    teamDomain: valid(normalizeTeamDomain, raw.teamDomain),
+    policyAud: valid(validatePolicyAud, raw.policyAud),
+    email: valid((v) => {
+      const list = String(v).split(",").map((s) => s.trim()).filter(Boolean);
+      if (!list.length) throw new Error("at least one allowed email");
+      return list.map(validateEmail).join(",");
+    }, raw.allowedEmails),
+  };
+  // The Worker compares these values verbatim (relay/src/agent-auth.ts, index.ts, oauth.ts), so
+  // a value that is only equal after trimming or normalizing is still a problem. Setup rewrites
+  // them in canonical form (personalConfig in install.mjs).
+  const problems = [];
+  if (betaEnabled && rawDeviceIds.some(id => typeof id === "string" && /^beta-/i.test(id))) {
+    problems.push("personal DEVICE_ID uses the reserved beta- prefix while BETA_REGISTRY_ENABLED=true");
+  }
+  if (deviceId && deviceIds.some((d) => d !== deviceId)) {
+    problems.push("AGENT_DEVICE_ID, CLIENT_DEVICE_ID and MCP_DEVICE_ID differ; they must be the same device id");
+  } else if (deviceId && rawDeviceIds.some((d) => d !== deviceId)) {
+    problems.push(`AGENT_DEVICE_ID, CLIENT_DEVICE_ID and MCP_DEVICE_ID must be exactly "${deviceId}" (the Worker compares them verbatim; remove surrounding whitespace)`);
+  }
+  if (relayUrl && raw.oauthIssuer !== relayUrl) {
+    problems.push(`OAUTH_ISSUER should be exactly ${relayUrl} (the Worker uses it verbatim)`);
+  }
+  if (relayUrl && raw.oauthResource !== `${relayUrl}/mcp`) {
+    problems.push(`OAUTH_RESOURCE should be exactly ${relayUrl}/mcp`);
+  }
+  return { raw, values, problems, accessConfigured: Boolean(values.teamDomain && values.policyAud) };
+}
+
+/**
+ * Applies `updates` ({ workerName, agentKey, clientKey, deviceId, relayUrl, email, teamDomain,
+ * policyAud }; undefined = leave as is) to the JSONC text and returns the new text. Values are
+ * validated here as well, so nothing unvalidated can reach the file.
+ */
+export function applyUpdates(text, updates) {
+  let out = text;
+  const set = (path, value) => {
+    out = setStringProperty(out, path, value);
+  };
+  if (updates.workerName !== undefined) set(FIELDS.workerName, validateWorkerName(updates.workerName));
+  if (updates.agentKey !== undefined) set(FIELDS.agentKey, validatePublicKeyB64(updates.agentKey));
+  if (updates.clientKey !== undefined) set(FIELDS.clientKey, validatePublicKeyB64(updates.clientKey));
+  if (updates.deviceId !== undefined) {
+    const id = validateDeviceId(updates.deviceId, parseJsonc(text).vars?.BETA_REGISTRY_ENABLED === "true");
+    for (const p of [FIELDS.agentDeviceId, FIELDS.clientDeviceId, FIELDS.mcpDeviceId]) set(p, id);
+  }
+  if (updates.relayUrl !== undefined) {
+    const origin = normalizeRelayUrl(updates.relayUrl);
+    set(FIELDS.oauthIssuer, origin);
+    set(FIELDS.oauthResource, `${origin}/mcp`);
+  }
+  if (updates.email !== undefined) set(FIELDS.allowedEmails, validateEmail(updates.email));
+  if (updates.teamDomain !== undefined) set(FIELDS.teamDomain, normalizeTeamDomain(updates.teamDomain));
+  if (updates.policyAud !== undefined) set(FIELDS.policyAud, validatePolicyAud(updates.policyAud));
+  // The result must still be valid JSONC holding exactly what was asked for.
+  const check = interpret(parseJsonc(out)).values;
+  for (const [k, v] of Object.entries(updates)) {
+    if (v !== undefined && !check[k]) throw new Error(`internal error: ${k} did not round-trip`);
+  }
+  return out;
+}
+
+/** Writes the personal config 0600 (it holds your email and device id; no secrets). */
+export function writePersonalConfig(file, text) {
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st) {
+    const error = personalConfigProblem(file, st);
+    if (error) throw new Error(error);
+  }
+  writeFileAtomic(file, text, 0o600);
+}

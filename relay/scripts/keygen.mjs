@@ -7,7 +7,8 @@
 // Private keys are PKCS#8 PEM files that never leave this Mac. The public keys are
 // printed as base64 SPKI DER ("MCowBQYDK2VwAyEA..."), which is exactly what the Worker
 // imports in src/index.ts (crypto.subtle.importKey("spki", atob(value), "Ed25519")).
-// Paste them into relay/wrangler.jsonc as AGENT_PUBLIC_KEY_B64 and CLIENT_PUBLIC_KEY_B64.
+// Paste them into relay/wrangler.personal.jsonc (your gitignored copy of the wrangler.jsonc
+// template) as AGENT_PUBLIC_KEY_B64 and CLIENT_PUBLIC_KEY_B64; ./install-macos.sh does it for you.
 //
 // Usage:
 //   node relay/scripts/keygen.mjs [--dir <path>]      generate both pairs
@@ -30,7 +31,7 @@ const USAGE = `Usage: node relay/scripts/keygen.mjs [--dir <path>] [--print-publ
 
   --dir <path>     where to write the keys (default: $ASTRA_HOME or ~/.astra-bridge)
   --print-public   do not generate anything; print the public keys of the existing
-                   private keys in that directory (for wrangler.jsonc)
+                   private keys in that directory (for wrangler.personal.jsonc)
   --help           show this help
 `;
 
@@ -125,7 +126,7 @@ function printPublic(dir) {
     }
     lines.push(`"${k.wranglerVar}": "${publicKeyB64(key)}",`);
   }
-  process.stdout.write(`Public keys for relay/wrangler.jsonc ("vars"):\n\n  ${lines.join("\n  ")}\n`);
+  process.stdout.write(`Public keys for relay/wrangler.personal.jsonc ("vars"):\n\n  ${lines.join("\n  ")}\n`);
 }
 
 function generate(dir) {
@@ -175,17 +176,18 @@ function generate(dir) {
   out.push(`Key directory: ${dir} (${dirState})`);
   for (const r of results) out.push(`  ${r.path} (0600, new ${r.name} private key)`);
   out.push("");
-  out.push('Public keys for relay/wrangler.jsonc ("vars"):');
+  out.push('Public keys for relay/wrangler.personal.jsonc ("vars"):');
   out.push("");
   for (const r of results) out.push(`  "${r.wranglerVar}": "${r.pubB64}",`);
   out.push("");
   out.push("Next steps:");
-  out.push("  1. Paste the two lines above into the \"vars\" block of relay/wrangler.jsonc.");
+  out.push("  1. Paste the two lines above into the \"vars\" block of relay/wrangler.personal.jsonc");
+  out.push("     (cp relay/wrangler.jsonc relay/wrangler.personal.jsonc; the copy is gitignored).");
   out.push("     Public keys are not secret; the private .pem files must never leave this Mac");
   out.push("     and must never be committed, copied into a Worker, or pasted into a chat.");
   out.push("  2. In the same file set AGENT_DEVICE_ID, CLIENT_DEVICE_ID and MCP_DEVICE_ID to one");
   out.push("     device name (for example my-mac). Use the same name for install-agent --device-id.");
-  out.push("  3. Deploy the Worker (cd relay && npx wrangler deploy), then install the Mac agent:");
+  out.push("  3. Deploy the Worker (cd relay && npm run deploy), then install the Mac agent:");
   out.push("       node relay/scripts/install-agent.mjs --relay-url https://<your-worker>.<your-subdomain>.workers.dev --device-id my-mac");
   if (dir !== defaultDir) {
     out.push(`     Keys are not in ${defaultDir}, so also pass --agent-key-file "${agentKey}"`);

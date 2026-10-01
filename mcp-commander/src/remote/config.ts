@@ -286,8 +286,8 @@ function place(canonical: string): Place {
 }
 
 /**
- * `inner` is `outer` or inside it: by path under any spelling (case-insensitively where the
- * filesystem usually is, see isWithin), or because `outer`'s device/inode is `inner` or one of its
+ * `inner` is `outer` or inside it: by canonical path under any spelling, or because
+ * `outer`'s device/inode is `inner` or one of its
  * ancestors (another mount or alias of the same directory, e.g. a Linux bind mount).
  */
 function placeWithin(inner: Place, outer: Place): boolean {

@@ -1,0 +1,14 @@
+{
+  "name": "astra-bridge-macos-installer",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Guided macOS setup, doctor and uninstall for Astra Bridge (Node built-ins only; no dependencies)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node test/prepare.mjs && node --test --test-concurrency=1 test/*.test.mjs"
+  }
+}
