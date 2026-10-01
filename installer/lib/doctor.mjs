@@ -108,13 +108,28 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch, makeLaun
 
   // --- personal Cloudflare config
   const personal = readPersonalConfig(ctx.personalConfig);
-  const beta = readState(ctx).betaEnrollment;
-  const recovery = beta ? "./install-macos.sh --beta-enroll" : "./install-macos.sh";
-  const v = beta ? { relayUrl: beta.relayUrl, deviceId: beta.deviceId } : personal.values ?? {};
-  if (beta) {
-    const valid = beta.registered === true && beta.agentPublicKeyB64 === keys.agent.publicKeyB64
-      && commander.cfg?.trustedTerminal === false && commander.cfg?.trustedGui === false && !personal.exists;
-    add("beta", "device registration", valid ? "pass" : "fail", valid ? "public identity matches local keys; file-only configuration" : "beta identity or file-only configuration is not verified", valid ? undefined : "./install-macos.sh --beta-enroll");
+  const installerState = readState(ctx);
+  const beta = installerState.betaEnrollment;
+  const accountPair = installerState.accountPairing;
+  const hosted = beta ?? accountPair;
+  const recovery = beta
+    ? "./install-macos.sh --beta-enroll"
+    : accountPair
+      ? "./install-macos.sh --account-pair"
+      : "./install-macos.sh";
+  const v = hosted ? { relayUrl: hosted.relayUrl, deviceId: hosted.deviceId } : personal.values ?? {};
+  if (beta && accountPair) {
+    add("identity", "enrollment state", "fail", "both invited-beta and account-pairing identities are recorded; refusing an ambiguous device identity", "Contact the operator before changing keys or state.");
+  }
+  if (hosted) {
+    const valid = hosted.registered === true && hosted.agentPublicKeyB64 === keys.agent.publicKeyB64
+      && commander.cfg?.trustedTerminal === false && commander.cfg?.trustedGui === false && !personal.exists
+      && !(beta && accountPair);
+    const group = beta ? "beta" : "account";
+    const name = beta ? "device registration" : "account pairing";
+    add(group, name, valid ? "pass" : "fail",
+      valid ? "public identity matches local keys; file-only configuration" : "hosted device identity or file-only configuration is not verified",
+      valid ? undefined : recovery);
   }
   else if (!personal.exists) add("cloudflare", "personal config", "fail", `${ctx.personalConfig} missing`, "./install-macos.sh");
   else if (personal.error) add("cloudflare", "personal config", "fail", personal.error);
@@ -194,7 +209,7 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch, makeLaun
   if (runtimeStatus?.loaded === false) runtimeProblem = `the agent is not running; its next start is unverified until ${recovery} restarts and checks it`;
   add("agent", "runtime changes", runtimeVerified ? "pass" : "fail",
     runtimeVerified ? restarted ? "restarted agent: applied fingerprint matches and process start follows every runtime input ctime" : "running PID and applied runtime fingerprint match current inputs" : runtimeProblem,
-    runtimeVerified ? undefined : beta ? recovery : `${recovery} (or --file-only to stop broader authority locally first)`);
+    runtimeVerified ? undefined : hosted ? recovery : `${recovery} (or --file-only to stop broader authority locally first)`);
   if (!runtimeVerified) {
     const mode = checks.find((c) => c.group === "workspace" && c.name === "access mode");
     if (mode) {
@@ -213,18 +228,24 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch, makeLaun
   }
   // The log is shared by every agent using this ~/.astra-bridge, so only read it for ours.
   const event = ours ? lastAgentEvent(logTail(path.join(ctx.astraHome, "agent.stderr.log")) ?? "") : null;
-  if (event) add("agent", "agent log", event.level, event.line.slice(0, 200), beta && event.why ? `Re-run ${recovery} or contact the operator` : event.why);
+  if (event) add("agent", "agent log", event.level, event.line.slice(0, 200), hosted && event.why ? `Re-run ${recovery} or contact support/the operator` : event.why);
 
   // --- relay (network)
   if (offline) add("relay", "network checks", "warn", "skipped (--offline)");
   else if (v.relayUrl) {
     const h = await probeHealth(v.relayUrl, { fetchImpl });
-    add("relay", "health", h.ok ? "pass" : "fail", h.ok ? `${v.relayUrl}/healthz OK` : `${v.relayUrl}/healthz: ${h.error}`, h.ok ? undefined : "Deployed? ./install-macos.sh --redeploy");
-    if (h.ok && v.deviceId && (beta ? keys.agent.ok : keys.client.ok)) {
-      const st = await (beta ? probeBetaStatus : probeAgentStatus)(v.relayUrl, v.deviceId, path.join(ctx.astraHome, beta ? KEY_FILES.agent : KEY_FILES.client), { fetchImpl });
+    add("relay", "health", h.ok ? "pass" : "fail", h.ok ? `${v.relayUrl}/healthz OK` : `${v.relayUrl}/healthz: ${h.error}`,
+      h.ok ? undefined : hosted ? recovery : "Deployed? ./install-macos.sh --redeploy");
+    if (h.ok && v.deviceId && (hosted ? keys.agent.ok : keys.client.ok)) {
+      const st = await (hosted ? probeBetaStatus : probeAgentStatus)(
+        v.relayUrl,
+        v.deviceId,
+        path.join(ctx.astraHome, hosted ? KEY_FILES.agent : KEY_FILES.client),
+        { fetchImpl },
+      );
       if (!st.ok) {
         add("relay", "agent connection", "fail", `signed status request refused: ${st.error}`,
-          beta ? "Re-run ./install-macos.sh --beta-enroll or contact the operator" : st.status === 401 || st.status === 403 ? "The deployed Worker has other keys or another device id: ./install-macos.sh --redeploy" : undefined);
+          hosted ? `Re-run ${recovery} or contact support/the operator` : st.status === 401 || st.status === 403 ? "The deployed Worker has other keys or another device id: ./install-macos.sh --redeploy" : undefined);
       } else {
         const ready = st.agentConnected && st.mcpHealthy;
         add("relay", "agent connection", ready ? "pass" : "fail",
