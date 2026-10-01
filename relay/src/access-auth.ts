@@ -1,6 +1,6 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { McpPrincipal } from "./mcp";
-import { OAUTH_SCOPES } from "./tool-policy";
+import { OAUTH_SCOPES, SCOPE_READ, SCOPE_WRITE } from "./tool-policy";
 
 /**
  * Cloudflare Access (Managed OAuth) origin validation for /mcp.
@@ -95,6 +95,16 @@ function remoteAccessKeys(config: AccessConfig): JWTVerifyGetKey {
 
 export type AccessIdentity = { email: string; subject: string };
 
+export type AccessDevicePrincipal = {
+  ownerId: string;
+  deviceId: string;
+  terminalEnabled: boolean;
+};
+
+export type AccessPrincipalResolver = (
+  identity: AccessIdentity,
+) => Promise<AccessDevicePrincipal | null>;
+
 /**
  * Verifies an Access JWT and returns the user identity, or null for any failure.
  * Service-token assertions carry no email and are refused: this is owner-only.
@@ -135,11 +145,23 @@ export async function authenticateAccessRequest(
   config: AccessConfig,
   deviceId: string | undefined,
   getKey?: JWTVerifyGetKey,
+  resolvePrincipal?: AccessPrincipalResolver,
 ): Promise<McpPrincipal | null> {
-  if (!deviceId) return null;
   const token = request.headers.get(ACCESS_JWT_HEADER)?.trim();
   if (!token) return null;
   const identity = await verifyAccessJwt(token, config, getKey);
   if (!identity) return null;
-  return { kind: "access", ownerId: "owner", deviceId, terminalEnabled: true, scopes: OAUTH_SCOPES };
+
+  const resolved = resolvePrincipal
+    ? await resolvePrincipal(identity)
+    : deviceId
+      ? { ownerId: "owner", deviceId, terminalEnabled: true }
+      : null;
+  if (!resolved) return null;
+
+  return {
+    kind: "access",
+    ...resolved,
+    scopes: resolved.terminalEnabled ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE],
+  };
 }
