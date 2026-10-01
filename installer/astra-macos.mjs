@@ -39,6 +39,7 @@ Install options:
   --skip-deps               do not run npm ci / npm run build
   --skip-cloudflare         local setup only (no login, deploy or Access steps)
   --beta-enroll             invited beta: file-only, no Cloudflare login
+  --account-pair            pair this Mac to your Astra account in the browser; file-only first
   --invite-file <path>      operator's relay-bound private 0600 invite.json
   --legacy-invite           warned compatibility: hidden prompt / ASTRA_BETA_INVITE
   --reset-pending-identity  recover old beta ID first; otherwise rotate pending ID/key
@@ -64,6 +65,7 @@ const BOOL_FLAGS = {
   "--legacy-invite": "legacyInvite",
   "--reset-pending-identity": "resetPendingIdentity",
   "--beta-enroll": "betaEnroll",
+  "--account-pair": "accountPair",
   "--enable-terminal": "enableTerminal",
   "--enable-gui": "enableGui",
   "--file-only": "fileOnly",
@@ -84,7 +86,7 @@ const BOOL_FLAGS = {
   "-h": "help",
 };
 const ALLOWED = {
-  install: new Set([...Object.values(VALUE_FLAGS), "betaEnroll", "legacyInvite", "resetPendingIdentity", "enableTerminal", "enableGui", "fileOnly", "reconfigure", "redeploy", "replaceExistingWorker", "skipDeps", "skipCloudflare", "noNetworkChecks", "yes", "nonInteractive", "help"]),
+  install: new Set([...Object.values(VALUE_FLAGS), "betaEnroll", "accountPair", "legacyInvite", "resetPendingIdentity", "enableTerminal", "enableGui", "fileOnly", "reconfigure", "redeploy", "replaceExistingWorker", "skipDeps", "skipCloudflare", "noNetworkChecks", "yes", "nonInteractive", "help"]),
   doctor: new Set(["noNetworkChecks", "json", "help", "nonInteractive"]),
   uninstall: new Set(["purge", "dryRun", "yes", "nonInteractive", "help"]),
 };
@@ -130,7 +132,12 @@ export function parseArgs(argv) {
     }
   }
   if (opts.fileOnly && (opts.enableTerminal || opts.enableGui)) throw new UsageError("--file-only cannot be combined with --enable-terminal / --enable-gui");
+  if (opts.betaEnroll && opts.accountPair) throw new UsageError("--beta-enroll and --account-pair are separate enrollment modes");
+  if (opts.accountPair && (opts.inviteFile || opts.legacyInvite || opts.resetPendingIdentity)) {
+    throw new UsageError("--account-pair cannot use beta invite/recovery options");
+  }
   if (opts.betaEnroll && opts.deviceId !== undefined) throw new UsageError("beta device IDs are generated; --device-id is not allowed");
+  if (opts.accountPair && opts.deviceId !== undefined) throw new UsageError("account-paired device IDs are generated; --device-id is not allowed");
   if (opts.accountId && !/^[a-f0-9]{32}$/.test(opts.accountId)) throw new UsageError("--account-id must be the 32-character hex account id");
   for (const [flag, key, validate] of [
     ["--device-id", "deviceId", validateDeviceId], ["--email", "email", validateEmail],
