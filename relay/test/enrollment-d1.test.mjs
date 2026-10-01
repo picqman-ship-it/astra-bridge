@@ -11,6 +11,7 @@ import { authorizeConnector, createInvite, revokeInvite } from "../scripts/beta-
 import { betaId, ORIGIN, signEnrollment } from "./beta-test-helpers.mjs";
 import { signedHeaders } from "../../installer/lib/relay-probe.mjs";
 const { redeemEnrollmentInvite } = await import("../src/beta-enrollment.ts");
+const { resolveAccessIdentityDevice } = await import("../.test-tmp/access-registry.mjs");
 const now = 1800000000000;
 const keys = generateKeyPairSync("ed25519");
 const publicKey = keys.publicKey.export({ type: "spki", format: "der" }).toString("base64");
@@ -35,7 +36,7 @@ async function fixture(t) {
   } }] });
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql"]) {
     const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
     for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
   }
@@ -95,6 +96,42 @@ test("local D1 enforces owner binding and unique keys; consumed revoke reports a
   assert.equal((await db.prepare("SELECT status FROM devices").first()).status, "revoked");
 });
 
+test("local D1 Access identity resolves exactly one active owned device and fails closed on ambiguity", async t => {
+  const { db, invite } = await fixture(t);
+  const deviceId = betaId("access-route");
+  assert.equal(await redeemEnrollmentInvite(db, invite.token, registration(invite.token, "access-route"), [], now, ORIGIN), true);
+
+  const issuer = "https://team.cloudflareaccess.com";
+  const subject = "subject-access-01";
+  await db.prepare(`
+    INSERT INTO user_identities (issuer, subject, owner_id, email, status, created_at)
+    VALUES (?, ?, 'tester', 'tester@example.com', 'active', '2026-01-01')
+  `).bind(issuer, subject).run();
+
+  assert.deepEqual(await resolveAccessIdentityDevice(db, issuer, subject), {
+    ownerId: "tester",
+    deviceId,
+    terminalEnabled: false,
+  });
+
+  const secondId = betaId("access-route-2");
+  await db.prepare(`
+    INSERT INTO devices (device_id, owner_id, agent_public_key_b64, status, terminal_enabled, created_at, revoked_at)
+    VALUES (?, 'tester', 'distinct-test-public-key', 'active', 0, '2026-01-02', NULL)
+  `).bind(secondId).run();
+  assert.equal(await resolveAccessIdentityDevice(db, issuer, subject), null, "multiple active devices must not be selected implicitly");
+
+  await db.prepare("UPDATE devices SET status = 'revoked', revoked_at = '2026-01-03' WHERE device_id = ?").bind(secondId).run();
+  assert.deepEqual(await resolveAccessIdentityDevice(db, issuer, subject), {
+    ownerId: "tester",
+    deviceId,
+    terminalEnabled: false,
+  });
+
+  await db.prepare("UPDATE user_identities SET status = 'disabled' WHERE issuer = ? AND subject = ?").bind(issuer, subject).run();
+  assert.equal(await resolveAccessIdentityDevice(db, issuer, subject), null);
+});
+
 test("local workerd verifier interoperates with installer PoP and rejects small-order forgeries", async t => {
   const { mf } = await fixture(t);
   const token = "abi1_" + "a".repeat(64);
@@ -141,7 +178,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
   // Whole migration/operator artifacts go through D1 exec; no statement picking.
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql"]) {
     await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   await db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01');");
