@@ -1,4 +1,6 @@
 import { APPROVED_TOOL_NAMES } from "./tool-policy";
+import { isBetaDeviceId } from "./beta-identity";
+import { canonicalAgentKey } from "./ed25519-validation";
 
 export type D1StatementLike = {
   bind: (...values: unknown[]) => D1StatementLike;
@@ -6,7 +8,11 @@ export type D1StatementLike = {
   run: () => Promise<unknown>;
 };
 
-export type D1DatabaseLike = { prepare: (query: string) => D1StatementLike };
+export type D1DatabaseLike = {
+  prepare: (query: string) => D1StatementLike;
+  // Required for enrollment. Older read-only adapters remain valid but cannot enroll.
+  batch?: (statements: D1StatementLike[]) => Promise<{ success: boolean; results?: unknown[] }[]>;
+};
 
 export type BetaPrincipal = {
   ownerId: string;
@@ -35,8 +41,16 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const ACTIVE_STATUSES = new Set(["active"]);
 
-// Process output and job metadata can disclose or control a durable command,
-// so the non-terminal beta profile excludes the complete process/job family.
+// Every new beta file capability requires explicit review here. Control telemetry
+// can expose command arguments and is intentionally absent.
+export const BETA_FILE_ONLY_TOOLS = new Set([
+  "get_config", "read_file", "read_multiple_files", "write_file", "create_directory",
+  "list_directory", "move_file", "get_file_info", "start_search", "get_more_search_results",
+  "stop_search", "list_searches", "edit_block",
+]);
+
+// Used by tool-policy tests to require control scope for the process/job/GUI family.
+// Beta file-only authorization uses BETA_FILE_ONLY_TOOLS, not this classification.
 export const TERMINAL_TOOL_NAMES = new Set([
   "start_process",
   "read_process_output",
@@ -80,12 +94,8 @@ export async function hashBearerToken(token: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function isTerminalTool(name: string): boolean {
-  return TERMINAL_TOOL_NAMES.has(name) && APPROVED_TOOL_NAMES.has(name);
-}
-
 export function isToolAllowedForPrincipal(name: string, principal: Pick<BetaPrincipal, "terminalEnabled">): boolean {
-  return APPROVED_TOOL_NAMES.has(name) && (principal.terminalEnabled || !isTerminalTool(name));
+  return APPROVED_TOOL_NAMES.has(name) && (principal.terminalEnabled || BETA_FILE_ONLY_TOOLS.has(name));
 }
 
 type PrincipalRow = {
@@ -99,7 +109,7 @@ type AgentRow = PrincipalRow & { agent_public_key_b64: string };
 function validPrincipalRow(row: PrincipalRow | null): row is PrincipalRow {
   return row !== null
     && isOpaqueId(row.owner_id)
-    && isOpaqueId(row.device_id)
+    && isBetaDeviceId(row.device_id)
     && (row.terminal_enabled === 0 || row.terminal_enabled === 1);
 }
 
@@ -132,7 +142,7 @@ export async function resolveActiveBetaDevice(
   registry: D1DatabaseLike,
   deviceId: string,
 ): Promise<BetaAgentDevice | null> {
-  if (!isOpaqueId(deviceId)) return null;
+  if (!isBetaDeviceId(deviceId)) return null;
   const row = await registry.prepare(`
     SELECT d.owner_id, d.device_id, d.agent_public_key_b64, d.terminal_enabled
     FROM devices AS d
@@ -142,7 +152,7 @@ export async function resolveActiveBetaDevice(
       AND u.status = 'active'
     LIMIT 1
   `).bind(deviceId).first<AgentRow>();
-  if (!validPrincipalRow(row) || typeof row.agent_public_key_b64 !== "string" || row.agent_public_key_b64.length === 0) {
+  if (!validPrincipalRow(row) || !canonicalAgentKey(row.agent_public_key_b64)) {
     return null;
   }
   return {
@@ -156,7 +166,7 @@ export async function resolveActiveBetaDevice(
 /** Writes a deliberately metadata-only audit row. Callers cannot pass payloads. */
 export async function recordAuditEvent(registry: D1DatabaseLike, event: AuditEvent): Promise<void> {
   if (!isOpaqueId(event.eventId) || !isOpaqueId(event.ownerId) || !isOpaqueId(event.deviceId)
-    || !APPROVED_TOOL_NAMES.has(event.toolName) || !isValidExpiration(event.createdAt, 0)
+    || (!APPROVED_TOOL_NAMES.has(event.toolName) && event.toolName !== "unapproved_tool") || !isValidExpiration(event.createdAt, 0)
     || (event.durationMs !== undefined && (!Number.isInteger(event.durationMs) || event.durationMs < 0))) {
     throw new Error("invalid_audit_event");
   }

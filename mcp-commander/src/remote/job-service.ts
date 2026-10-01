@@ -6,6 +6,7 @@ import { ToolError } from '../types.js';
 import type { RemoteConfig } from './config.js';
 import { PathNotAllowedError, expandHome } from '../security/paths.js';
 import { resolveShell } from '../terminal/shell.js';
+import { assertJobsEnabled } from './offboarding.js';
 import {
   DurableStateError, UnsyncedRecordError, canonicalJson, createExclusive, processStatus, readJson, sameProcess, sha256,
 } from './durable.js';
@@ -69,6 +70,7 @@ export class JobService {
   /** Starts a worker unless one is running (or exists but is unresponsive). */
   async ensureWorker(): Promise<WorkerHealth['state'] | 'started'> {
     return this.store.lock.with(() => {
+      assertJobsEnabled(this.store.root);
       const h = this.store.workerHealth();
       if (h.state === 'running' || h.state === 'unresponsive') return h.state;
       this.spawnWorker();
@@ -120,6 +122,7 @@ export class JobService {
         }
       }
       outcome = await this.store.lock.with(async () => {
+        assertJobsEnabled(this.store.root);
         const keyFile = this.store.keyFile(keyHash);
         const existing = readJson<JobKeyRecord>(keyFile);
         if (existing) {

@@ -19,4 +19,5 @@ coverage/
 *.key
 *.p12
 wrangler.personal.jsonc
+wrangler.personal.jsonc.*
 wrangler.*.local.jsonc

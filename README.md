@@ -13,24 +13,57 @@ ChatGPT ──OAuth (Cloudflare Access)──▶ your Worker /mcp ──▶ Dura
 |---|---|
 | [`relay/`](relay/README.md) | Cloudflare Worker + Durable Object relay, the Mac agent (`relay/src/agent.mjs`), key and LaunchAgent helper scripts |
 | [`mcp-commander/`](mcp-commander/README.md) | The MCP server that runs on the Mac and does the actual work (files, terminal sessions, search, durable jobs, GUI tools) |
+| [`installer/`](installer/README.md) | The macOS installer behind `./install-macos.sh`: guided setup, `doctor`, `uninstall` |
 
 > [!WARNING]
 > **This is remote-shell-equivalent access to your Mac.** Whoever controls your Access login, your Cloudflare account or the signed-RPC client key can do anything your macOS user can do once terminal tools are enabled. Content the AI reads (web pages, emails, documents) can try to steer it through prompt injection. Start in **file-only mode** with a dedicated folder, enable terminal and GUI tools only if you need them, and read [SECURITY.md](SECURITY.md) first. Single owner only — do not share the connector.
 
 ## What you need
 
-- A Mac (Apple Silicon or Intel) with Node.js 22+ (required by the current `wrangler`) and the Xcode Command Line Tools (`xcode-select --install`; used to build the small Swift Accessibility helper).
+- A Mac with macOS 13 (Ventura) or newer, Apple Silicon or Intel, with Node.js 22+ (required by the current `wrangler`) and the Xcode Command Line Tools (`xcode-select --install`; they provide `git` and build the small Swift helper the optional GUI tools use).
 - A Cloudflare account. The Workers **Free** plan is enough for one Mac; Zero Trust Free for Cloudflare Access.
 - A ChatGPT plan that lets you add custom connectors / apps (developer mode).
 
-## Setup
+## Quick start on macOS
+
+> [!CAUTION]
+> The installer sets up **file-only** access to one dedicated folder. It never turns on terminal or GUI tools unless you pass `--enable-terminal` / `--enable-gui` and confirm, because those give the AI client the same power over your Mac as you have. Read [SECURITY.md](SECURITY.md) before you start.
+
+```sh
+git clone <this repository> astra-bridge && cd astra-bridge
+./install-macos.sh
+```
+
+That is the only command to remember. It checks your Mac (macOS, Apple Silicon/Intel, Node.js 22+, npm, Xcode Command Line Tools) and tells you exactly what to install if something is missing; it never installs system software or uses `sudo`. Then it:
+
+1. installs the pinned dependencies (`npm ci`) and builds mcp-commander;
+2. creates `~/remote-workspace` and configures mcp-commander for it in file-only mode;
+3. generates your keys in `~/.astra-bridge` (private keys never leave the Mac and are never printed);
+4. writes your personal, gitignored `relay/wrangler.personal.jsonc` (asks for your email and a device name);
+5. logs you in to Cloudflare (browser) and deploys the relay Worker to **your** account, after asking;
+6. installs and starts the Mac agent as a LaunchAgent in your user session, after showing you what it will run;
+7. walks you through the one dashboard task it cannot do for you, protecting `/mcp` with Cloudflare Access, and then **verifies** from outside that Access is really in front of it.
+
+Wherever you have to act in a browser or dashboard, it stops with exact instructions (exit code 3). Run `./install-macos.sh` again afterwards to continue; every step it has already done is detected and skipped. At the end it prints the ChatGPT connector settings (step 8 below).
+
+```sh
+./install-macos.sh doctor       # read-only health check: config, permissions, build, agent, relay, Access
+./install-macos.sh uninstall    # stop and remove the agent; keeps keys and config (add --purge to delete them)
+./install-macos.sh --help       # all options, for example --workspace, --email, --enable-terminal
+```
+
+Details, exit codes and the reasons there is no signed `.pkg` yet: [installer/README.md](installer/README.md).
+
+## Manual setup (advanced / reference)
+
+These are the steps the installer performs, for people who want to do or audit them by hand.
 
 ### 1. Get the code and build mcp-commander
 
 ```sh
 git clone <this repository> astra-bridge && cd astra-bridge
-(cd mcp-commander && npm install && npm run build)
-(cd relay && npm install)
+(cd mcp-commander && npm ci && npm run build)
+(cd relay && npm ci)
 ```
 
 ### 2. Configure what the Mac side may touch
@@ -39,18 +72,18 @@ mcp-commander's remote mode is confined to explicit root folders. Start with fil
 
 ```sh
 mkdir -p ~/remote-workspace
-(cd mcp-commander && npm run remote:setup -- --root ~/remote-workspace --protect ../relay)
+(cd mcp-commander && npm run remote:setup -- --root ~/remote-workspace --protect ..)
 ```
 
 This writes `~/.mcp-commander-remote/remote.json` (0600). It exposes 15 file/search tools.
 
-**Roots are checked.** mcp-commander refuses a root that is, contains or sits inside a sensitive location — your home folder, `~/.ssh`, `~/Library/LaunchAgents`, its own installation, `~/.astra-bridge` (your private keys) and anything listed with `--protect` (here the `relay/` code the LaunchAgent runs; the agent also passes that directory to mcp-commander itself). Case variants, symlinks and macOS firmlink spellings do not get around the check. A dedicated folder such as `~/remote-workspace` is still the right choice.
+**Roots are checked.** mcp-commander refuses a root that is, contains or sits inside a sensitive location — your home folder, `~/.ssh`, `~/Library/LaunchAgents`, its own installation, `~/.astra-bridge` (your private keys) and anything listed with `--protect` (here the whole checkout: the `relay/` code the LaunchAgent runs, mcp-commander and the installer; the agent also passes its `relay/` directory to mcp-commander itself). Case variants, symlinks and macOS firmlink spellings do not get around the check. A dedicated folder such as `~/remote-workspace` is still the right choice.
 
 Optional, riskier modes:
 
 - Terminal, processes and durable jobs (27 tools; arbitrary code execution as your user — roots no longer contain it):
-  `(cd mcp-commander && npm run remote:setup -- --root ~/remote-workspace --protect ../relay --trusted-terminal --replace-config)`
-- GUI tools (`list_windows`, `inspect_ui`, `press_element`, `set_element_value`; +4, so 19 or 31 tools): set `"trustedGui": true` by hand in `~/.mcp-commander-remote/remote.json`, then grant Accessibility to your Node binary in **System Settings → Privacy & Security → Accessibility** when macOS asks.
+  `(cd mcp-commander && npm run remote:setup -- --root ~/remote-workspace --protect .. --trusted-terminal --replace-config)`
+- GUI tools (`list_windows`, `inspect_ui`, `press_element`, `set_element_value`; +4, so 19 or 31 tools): add `--trusted-gui` to the setup command (or set `"trustedGui": true` by hand in `~/.mcp-commander-remote/remote.json`), then grant Accessibility to your Node binary in **System Settings → Privacy & Security → Accessibility** when macOS asks.
 
 mcp-commander reads `remote.json` only when it starts. After any change to it (including switching a mode off again), restart the agent once it is installed (step 7): `launchctl kickstart -k gui/$(id -u)/com.example.astra-bridge-agent`.
 

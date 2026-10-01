@@ -285,6 +285,18 @@ expiry; temp dirs are removed (`--keep-work` keeps the work dir on failure).
   session ids are unknown (404), and earlier interactive processes cannot be resumed.
 * **Durable jobs (`job_start`) are not interactive processes** and are not stopped by a service
   stop — see 6a.
+* Astra Bridge's `./install-macos.sh uninstall` and permission-reducing setup (`--file-only` or
+  `--reconfigure`) explicitly stop tracked durable work as well (`stopDurableJobs` in
+  `src/remote/offboarding.ts`). They disable new job submissions, cancel queued work, verify every
+  recorded worker and job process (PID + start time) before signalling any of them, and report
+  shutdown as unconfirmed, never as done, when something cannot be verified. A job group that
+  outlives its verified leader is waited for (SIGKILL after 3.5 s); a group without a verified
+  leader is never signalled. A record without a process ID (e.g. `outcome_unknown` after a worker
+  crash between intent and start) cannot be verified: inspect it, then move that one job directory
+  out of `durable/jobs/` to acknowledge it. Job records are otherwise retained. `--enable-terminal`
+  is required to allow new durable jobs after offboarding; cancelled jobs are never resurrected.
+  Programs that detached from tracked groups during earlier terminal access require separate
+  local inspection.
 
 ### 6a. Durable jobs
 

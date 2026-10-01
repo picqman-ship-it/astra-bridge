@@ -7,6 +7,7 @@ import { RemoteConfigSource, type RemoteConfig } from './config.js';
 import { IdempotencyStore } from './idempotency.js';
 import { JobService } from './job-service.js';
 import { remoteInstructions, selectRemoteTools } from './policy.js';
+import { RootGuard } from './root-guard.js';
 
 const SUPERVISE_EVERY_MS = 2000;
 
@@ -31,12 +32,14 @@ export class RemoteRuntime {
   /** Present only in trusted-terminal mode. */
   readonly jobs: JobService | null;
   private readonly config: RemoteConfigSource;
+  private readonly roots: RootGuard;
   private stopping: Promise<void> | null = null;
   private supervisor: NodeJS.Timeout | null = null;
   private supervising = false;
   private reportedSupervisionError = false;
 
   constructor(readonly cfg: RemoteConfig) {
+    this.roots = new RootGuard(cfg.roots);
     this.config = new RemoteConfigSource(cfg);
     this.audit = new AuditLog(cfg.auditFile, cfg.audit.maxBytes, cfg.audit.maxFiles);
     this.idempotency = new IdempotencyStore(cfg);
@@ -73,7 +76,7 @@ export class RemoteRuntime {
       history: this.history,
       terminal: this.terminal,
       search: this.search,
-      selectTools: selectRemoteTools(this.cfg, { idempotency: this.idempotency, jobs: this.jobs }),
+      selectTools: selectRemoteTools(this.cfg, { idempotency: this.idempotency, jobs: this.jobs, roots: this.roots }),
       instructions: remoteInstructions(this.cfg),
       onToolCall: (e) =>
         this.audit.write({

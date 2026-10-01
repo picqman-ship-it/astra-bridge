@@ -219,7 +219,7 @@ export class JobStore {
   readonly workerLog: string;
   readonly lock: FileLock;
 
-  constructor(readonly cfg: RemoteConfig) {
+  constructor(readonly cfg: Pick<RemoteConfig, 'durableDir'>) {
     this.root = cfg.durableDir;
     this.jobsDir = path.join(this.root, 'jobs');
     this.activeDir = path.join(this.root, 'active');

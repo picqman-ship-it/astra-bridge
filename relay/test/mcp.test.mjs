@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { authenticateMcpRequest, handleMcpRequest, MCP_MAX_BODY_BYTES } from "../.test-tmp/mcp.mjs";
+import { generateKeyPairSync } from "node:crypto";
+import { betaId } from "./beta-test-helpers.mjs";
+import { authenticateBetaMcpRequest, authenticateMcpRequest, handleMcpRequest, MCP_MAX_BODY_BYTES } from "../.test-tmp/mcp.mjs";
 import { hashBearerToken, resolveActiveBetaDevice, resolveBetaBearerHash } from "../.test-tmp/beta-registry.mjs";
 
 const TOKEN = "test-token-which-is-long-enough-to-be-a-high-entropy-secret";
@@ -183,6 +185,7 @@ class MockRegistry {
 }
 
 async function betaFixture() {
+  const publicKey = () => generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64");
   const tokenA = "beta-token-a-which-is-long-enough-to-be-a-high-entropy-secret";
   const tokenB = "beta-token-b-which-is-long-enough-to-be-a-high-entropy-secret";
   const [hashA, hashB] = await Promise.all([hashBearerToken(tokenA), hashBearerToken(tokenB)]);
@@ -192,12 +195,12 @@ async function betaFixture() {
       { user_id: "user-bravo", status: "active" },
     ],
     devices: [
-      { device_id: "device-alpha", owner_id: "user-alpha", status: "active", revoked_at: null, terminal_enabled: 0, agent_public_key_b64: "alpha-key" },
-      { device_id: "device-bravo", owner_id: "user-bravo", status: "active", revoked_at: null, terminal_enabled: 1, agent_public_key_b64: "bravo-key" },
+      { device_id: betaId("alpha"), owner_id: "user-alpha", status: "active", revoked_at: null, terminal_enabled: 0, agent_public_key_b64: publicKey() },
+      { device_id: betaId("bravo"), owner_id: "user-bravo", status: "active", revoked_at: null, terminal_enabled: 1, agent_public_key_b64: publicKey() },
     ],
     tokens: [
-      { token_hash: hashA, owner_id: "user-alpha", device_id: "device-alpha", status: "active", revoked_at: null, expires_at: null },
-      { token_hash: hashB, owner_id: "user-bravo", device_id: "device-bravo", status: "active", revoked_at: null, expires_at: null },
+      { token_hash: hashA, owner_id: "user-alpha", device_id: betaId("alpha"), status: "active", revoked_at: null, expires_at: null },
+      { token_hash: hashB, owner_id: "user-bravo", device_id: betaId("bravo"), status: "active", revoked_at: null, expires_at: null },
     ],
   });
   return { registry, tokenA, tokenB, hashA, hashB };
@@ -206,12 +209,12 @@ async function betaFixture() {
 test("a beta token hash resolves only its bound active device", async () => {
   const { registry, hashA, hashB } = await betaFixture();
   assert.deepEqual(await resolveBetaBearerHash(registry, hashA), {
-    ownerId: "user-alpha", deviceId: "device-alpha", terminalEnabled: false,
+    ownerId: "user-alpha", deviceId: betaId("alpha"), terminalEnabled: false,
   });
   assert.deepEqual(await resolveBetaBearerHash(registry, hashB), {
-    ownerId: "user-bravo", deviceId: "device-bravo", terminalEnabled: true,
+    ownerId: "user-bravo", deviceId: betaId("bravo"), terminalEnabled: true,
   });
-  assert.equal((await resolveActiveBetaDevice(registry, "device-alpha")).agentPublicKeyB64, "alpha-key");
+  assert.equal((await resolveActiveBetaDevice(registry, betaId("alpha"))).agentPublicKeyB64, registry.devices[0].agent_public_key_b64);
 });
 
 test("revoked or expired beta tokens and devices are denied", async () => {
@@ -224,18 +227,18 @@ test("revoked or expired beta tokens and devices are denied", async () => {
   registry.tokens[0].expires_at = null;
   registry.devices[0].status = "revoked";
   assert.equal(await resolveBetaBearerHash(registry, hashA), null);
-  assert.equal(await resolveActiveBetaDevice(registry, "device-alpha"), null);
+  assert.equal(await resolveActiveBetaDevice(registry, betaId("alpha")), null);
 });
 
 test("synthetic beta users cannot cross devices", async () => {
   const { registry, tokenA, tokenB } = await betaFixture();
   const [principalA, principalB] = await Promise.all([
-    authenticateMcpRequest(request(undefined, { headers: { authorization: `Bearer ${tokenA}` } }), mcpEnv({ BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: registry })),
-    authenticateMcpRequest(request(undefined, { headers: { authorization: `Bearer ${tokenB}` } }), mcpEnv({ BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: registry })),
+    authenticateBetaMcpRequest(request(undefined, { headers: { authorization: `Bearer ${tokenA}` } }), mcpEnv({ BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: registry })),
+    authenticateBetaMcpRequest(request(undefined, { headers: { authorization: `Bearer ${tokenB}` } }), mcpEnv({ BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: registry })),
   ]);
-  assert.equal(principalA.deviceId, "device-alpha");
+  assert.equal(principalA.deviceId, betaId("alpha"));
   assert.equal(principalA.ownerId, "user-alpha");
-  assert.equal(principalB.deviceId, "device-bravo");
+  assert.equal(principalB.deviceId, betaId("bravo"));
   assert.equal(principalB.ownerId, "user-bravo");
   assert.notEqual(principalA.deviceId, principalB.deviceId);
 });
@@ -250,12 +253,13 @@ test("terminal-disabled beta principals filter and block process and durable-com
   });
   const calls = [];
   const relay = async (payload) => { calls.push(payload); return payload.action === "tools/list" ? { tools } : { content: [] }; };
-  const listed = await handleMcpRequest(betaRequest({ jsonrpc: "2.0", id: 21, method: "tools/list", params: {} }), env, relay);
+  const auth = { authenticate: request => authenticateBetaMcpRequest(request, env) };
+  const listed = await handleMcpRequest(betaRequest({ jsonrpc: "2.0", id: 21, method: "tools/list", params: {} }), env, relay, auth);
   const listedNames = (await listed.json()).result.tools.map((tool) => tool.name);
   for (const name of ["start_process", "read_process_output", "interact_with_process", "force_terminate", "list_sessions", "list_processes", "kill_process", "job_start", "job_status", "job_list", "job_logs", "job_cancel"]) {
     assert.equal(listedNames.includes(name), false, name);
   }
-  const blocked = await handleMcpRequest(betaRequest({ jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "job_start", arguments: {} } }), env, relay);
+  const blocked = await handleMcpRequest(betaRequest({ jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "job_start", arguments: {} } }), env, relay, auth);
   const body = await blocked.json();
   assert.equal(body.result.isError, true);
   assert.equal(body.result.content[0].text, "Tool is not enabled for this device.");

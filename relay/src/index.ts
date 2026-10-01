@@ -1,15 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
 import { EmailMessage } from "cloudflare:email";
-import { handleMcpRequest, RelayError, type McpRelay, type RelayPayload } from "./mcp";
+import { authenticateBetaMcpRequest, handleMcpRequest, RelayError, type McpRelay, type RelayPayload } from "./mcp";
 import { accessConfig, authenticateAccessRequest, mcpAuthMode, type AccessEnv } from "./access-auth";
 import { resolveAgentAuthentication } from "./agent-auth";
-import type { D1DatabaseLike } from "./beta-registry";
+import { handleEnrollment } from "./beta-enrollment";
+import { BodyTooLargeError, readBoundedBody } from "./bounded-body";
+import { recordAuditEvent, type D1DatabaseLike } from "./beta-registry";
+import { betaRateGate, type BetaRateEnv } from "./beta-rate-limit";
+import { isBetaDeviceId, isPersonalDeviceId } from "./beta-identity";
 import { handleOAuthRoute, oauthConfig, verifyOAuthAccessToken, type OAuthEnv } from "./oauth";
 import { hasValidIdempotencyKey, IDEMPOTENCY_REQUIRED, isToolApproved } from "./tool-policy";
 
 export { OAuthStore } from "./oauth-store";
 
-interface Env extends OAuthEnv, AccessEnv {
+interface Env extends OAuthEnv, AccessEnv, BetaRateEnv {
   DEVICE_RELAY: DurableObjectNamespace<DeviceRelay>;
   AGENT_PUBLIC_KEY_B64: string;
   CLIENT_PUBLIC_KEY_B64: string;
@@ -19,6 +23,7 @@ interface Env extends OAuthEnv, AccessEnv {
   MCP_BEARER_TOKEN?: string;
   OPENAI_APPS_CHALLENGE?: string;
   BETA_REGISTRY_ENABLED?: string;
+  BETA_ENROLLMENT_ENABLED?: string;
   BETA_REGISTRY?: D1DatabaseLike;
   // Liveness alerting (see scheduled() below). Absent in tests/dry-run: alerting then
   // no-ops instead of throwing, so a missing binding never breaks agent-state bookkeeping.
@@ -87,8 +92,6 @@ const AGENT_ERROR_STATUS: Record<string, number> = {
   tool_error: 502,
 };
 
-class BodyTooLargeError extends Error {}
-
 function json(data: unknown, status = 200, extraHeaders: HeadersInit = {}): Response {
   return Response.json(data, {
     status,
@@ -135,33 +138,7 @@ async function readBodyBounded(request: Request): Promise<Uint8Array> {
     }
   }
 
-  // Count actual bytes: Content-Length is optional and attacker-controlled.
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > MAX_BODY_BYTES) {
-        await reader.cancel("request too large").catch(() => {});
-        throw new BodyTooLargeError("request_too_large");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body;
+  return readBoundedBody(request.body, MAX_BODY_BYTES, { ignoreCancelErrors: true });
 }
 async function verifySignedRequest(
   request: Request,
@@ -204,13 +181,13 @@ async function verifySignedRequest(
 }
 
 async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
-  if (!env.MCP_DEVICE_ID) {
-    return json({ error: "service_unavailable" }, 503);
+  if (!isPersonalDeviceId(env.MCP_DEVICE_ID, env.BETA_REGISTRY_ENABLED === "true")) {
+    return json({ error: "personal_device_id_reserved" }, 503);
   }
 
   // Authentication resolves the principal first. The MCP request cannot select a
   // device: operator, OAuth, and Access auth resolve to MCP_DEVICE_ID. Beta principals
-  // are refused until closed-beta routing exists, so a beta token never reaches a device.
+  // are refused on this personal route; closed-beta routing is separate below.
   const relay: McpRelay = async (payload, principal) => {
     if (principal.kind === "beta" || principal.deviceId !== env.MCP_DEVICE_ID) {
       throw new RelayError("agent_unavailable");
@@ -238,6 +215,39 @@ async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
     resourceMetadataUrl: config?.resourceMetadataUrl,
     verifyAccessToken: (token) => verifyOAuthAccessToken(env, token),
   });
+}
+
+async function handleBetaMcpRoute(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
+    return json({ error: "not_found" }, 404);
+  }
+  const limited = await betaRateGate(request, env, "mcp");
+  if (limited) return limited;
+
+  const relay: McpRelay = async (payload, principal) => {
+    if (principal.kind !== "beta") throw new RelayError("agent_unavailable");
+    const stub = env.DEVICE_RELAY.getByName(principal.deviceId);
+    const outcome = await stub.mcpRpc(payload) as unknown as RpcOutcome;
+    if (!outcome.ok) throw new RelayError(outcome.error);
+    return outcome.result;
+  };
+
+  return handleMcpRequest(request, env, relay, {
+    auditTool: (principal, name, outcome, durationMs) => {
+      const pending = recordAuditEvent(env.BETA_REGISTRY!, {
+        eventId: crypto.randomUUID(), ownerId: principal.ownerId, deviceId: principal.deviceId,
+        toolName: name, outcome, durationMs, createdAt: new Date().toISOString(),
+      }).catch(() => { /* Metadata audit is best effort and never logs errors/payloads. */ });
+      if (ctx) ctx.waitUntil(pending);
+    },
+    authenticate: async (req) => {
+      const principal = await authenticateBetaMcpRequest(req, env);
+      // Even an incorrectly provisioned registry row cannot target a personal device.
+      return principal?.kind === "beta"
+        && ![env.AGENT_DEVICE_ID, env.CLIENT_DEVICE_ID, env.MCP_DEVICE_ID].includes(principal.deviceId)
+        ? principal : null;
+    },
+  }).catch(() => json({ error: "service_unavailable" }, 503));
 }
 
 // ---- Liveness alert email (plain RFC 5322 message, no library) --------------------
@@ -297,8 +307,30 @@ function buildAlertRawEmail(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/beta/enroll") return handleEnrollment(request, env);
+
+    // Readiness only, authenticated by the enrolled agent key. No client key or MCP token.
+    const betaStatus = url.pathname.match(/^\/beta\/device\/([A-Za-z0-9][A-Za-z0-9._-]{0,95})\/status$/);
+    if (betaStatus) {
+      if (env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) return json({ error: "not_found" }, 404);
+      const limited = await betaRateGate(request, env, "status");
+      if (limited) return limited;
+      if (request.method !== "GET" || url.protocol !== "https:" || url.search) return json({ error: "bad_request" }, 400);
+      if (!authShapeOk(request)) return json({ error: "unauthorized" }, 401);
+      try {
+        const deviceId = betaStatus[1];
+        if (!isBetaDeviceId(deviceId) || [env.AGENT_DEVICE_ID, env.CLIENT_DEVICE_ID, env.MCP_DEVICE_ID].includes(deviceId)) return json({ error: "unauthorized" }, 403);
+        const auth = await resolveAgentAuthentication(env, deviceId);
+        if (!auth?.beta || !(await verifySignedRequest(request, auth.publicKeyB64, new Uint8Array()))) return json({ error: "unauthorized" }, 403);
+        // DeviceRelay applies its existing rate limit and durable nonce replay check.
+        const forwarded = new URL(request.url);
+        forwarded.pathname = `/v1/device/${deviceId}/status`;
+        return await env.DEVICE_RELAY.getByName(deviceId).fetch(new Request(forwarded, { headers: request.headers }));
+      } catch { return json({ error: "service_unavailable" }, 503); }
+    }
 
     if (url.pathname === "/healthz") {
       if (request.method !== "GET" && request.method !== "HEAD") {
@@ -323,6 +355,10 @@ export default {
 
     if (url.pathname === "/mcp") {
       return handleMcpRoute(request, env);
+    }
+
+    if (url.pathname === "/beta/mcp") {
+      return handleBetaMcpRoute(request, env, ctx);
     }
 
     // The Worker's own owner-secret OAuth server exists only in static mode. In
@@ -354,7 +390,7 @@ export default {
     // Legacy status/RPC remains personal-only. Agent connect may resolve a beta
     // device through the opt-in registry, but only after the request has a valid
     // signature shape so anonymous traffic cannot cause registry lookups.
-    if (action !== "connect" && (!env.CLIENT_DEVICE_ID || deviceId !== env.CLIENT_DEVICE_ID)) {
+    if (action !== "connect" && (!isPersonalDeviceId(env.CLIENT_DEVICE_ID, env.BETA_REGISTRY_ENABLED === "true") || deviceId !== env.CLIENT_DEVICE_ID)) {
       return json({ error: "device_not_authorized" }, 403);
     }
 
@@ -371,7 +407,14 @@ export default {
 
     let publicKey: string | undefined;
     if (action === "connect") {
-      const auth = await resolveAgentAuthentication(env, deviceId);
+      // The connect path also performs registry reads and needs the same pre-D1 gate.
+      if (isBetaDeviceId(deviceId) && env.BETA_REGISTRY_ENABLED === "true") {
+        const limited = await betaRateGate(request, env, "connect");
+        if (limited) return limited;
+      }
+      let auth;
+      try { auth = await resolveAgentAuthentication(env, deviceId); }
+      catch { return json({ error: "service_unavailable" }, 503); }
       if (!auth) return json({ error: "device_not_authorized" }, 403);
       publicKey = auth.publicKeyB64;
     } else {
