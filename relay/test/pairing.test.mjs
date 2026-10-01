@@ -128,7 +128,13 @@ test("expired, invalid and replayed pairing material fails closed", async () => 
     email: "expired@example.com",
   }, NOW + PAIR_TTL_MS), null);
 
-  assert.equal(await createPairingSession(registry, body, NOW + 10), null, "request/device replay must not create a second session");
+  assert.equal(await createPairingSession(registry, body, NOW + 10), null, "same request id must not create a second session");
+
+  const retry = await registration({ deviceId: DEVICE });
+  const retried = await createPairingSession(registry, await validatePairStart(retry.body, ORIGIN), NOW + PAIR_TTL_MS + 1);
+  assert.ok(retried, "a fresh signed request may retry the same still-unpaired Mac after expiry");
+  assert.notEqual(retried.secret, session.secret);
+
   assert.equal(await pairingStatus(registry, "ap1_" + "0".repeat(64), NOW), null);
   db.close();
 });
