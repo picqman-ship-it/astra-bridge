@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { EmailMessage } from "cloudflare:email";
 import { authenticateBetaMcpRequest, handleMcpRequest, RelayError, type McpRelay, type RelayPayload } from "./mcp";
 import { accessConfig, authenticateAccessRequest, mcpAuthMode, type AccessEnv } from "./access-auth";
+import { resolveAccessIdentityDevice } from "./access-registry";
 import { resolveAgentAuthentication } from "./agent-auth";
 import { handleEnrollment } from "./beta-enrollment";
 import { BodyTooLargeError, readBoundedBody } from "./bounded-body";
@@ -25,6 +26,8 @@ interface Env extends OAuthEnv, AccessEnv, BetaRateEnv {
   BETA_REGISTRY_ENABLED?: string;
   BETA_ENROLLMENT_ENABLED?: string;
   BETA_REGISTRY?: D1DatabaseLike;
+  /** "fixed" (default) keeps the single owner device; "registry" routes Access identities through D1. */
+  ACCESS_DEVICE_ROUTING?: string;
   // Liveness alerting (see scheduled() below). Absent in tests/dry-run: alerting then
   // no-ops instead of throwing, so a missing binding never breaks agent-state bookkeeping.
   ALERT_EMAIL?: SendEmail;
@@ -188,8 +191,11 @@ async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
   // Authentication resolves the principal first. The MCP request cannot select a
   // device: operator, OAuth, and Access auth resolve to MCP_DEVICE_ID. Beta principals
   // are refused on this personal route; closed-beta routing is separate below.
+  const registryRouting = env.ACCESS_DEVICE_ROUTING?.trim().toLowerCase() === "registry";
+
   const relay: McpRelay = async (payload, principal) => {
-    if (principal.kind === "beta" || principal.deviceId !== env.MCP_DEVICE_ID) {
+    const dynamicAccess = registryRouting && principal.kind === "access";
+    if (principal.kind === "beta" || (!dynamicAccess && principal.deviceId !== env.MCP_DEVICE_ID)) {
       throw new RelayError("agent_unavailable");
     }
     const stub = env.DEVICE_RELAY.getByName(principal.deviceId);
@@ -205,6 +211,26 @@ async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
   if (mode === "access") {
     const access = accessConfig(env);
     if (!access) return json({ error: "service_unavailable" }, 503);
+
+    if (registryRouting) {
+      if (env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
+        return json({ error: "service_unavailable" }, 503);
+      }
+      return handleMcpRequest(request, env, relay, {
+        authenticate: (req) => authenticateAccessRequest(
+          req,
+          access,
+          undefined,
+          undefined,
+          (identity) => resolveAccessIdentityDevice(
+            env.BETA_REGISTRY!,
+            access.issuer,
+            identity.subject,
+          ),
+        ),
+      });
+    }
+
     return handleMcpRequest(request, env, relay, {
       authenticate: (req) => authenticateAccessRequest(req, access, env.MCP_DEVICE_ID),
     });
