@@ -28,7 +28,9 @@ jobs:
       - run: npm test
 
   installer:
-    runs-on: ubuntu-latest
+    # Installer/runtime verification exercises macOS plutil, launchd-shaped plists,
+    # filesystem ctime semantics and the native Accessibility helper.
+    runs-on: macos-14
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
