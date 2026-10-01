@@ -7,7 +7,7 @@ export function sqliteRegistry(file = ":memory:", { migrate = true } = {}) {
   const db = new DatabaseSync(file);
   db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;");
   if (migrate) {
-    for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql"]) {
+    for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql"]) {
       db.exec(fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
     }
   }
