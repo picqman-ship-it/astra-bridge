@@ -12,7 +12,7 @@ import {
 import { assertTrustedBetaRelay } from "../lib/beta-trust.mjs";
 import { readState, writeState } from "../lib/state.mjs";
 import { parseArgs } from "../astra-macos.mjs";
-import { tmpDir } from "./helpers.mjs";
+import { makeSandbox, prerequisitesBuilt, tmpDir } from "./helpers.mjs";
 
 const BASE = "https://astra-bridge-relay.example-sub.workers.dev";
 const DEVICE = "beta-00000000-0000-4000-8000-000000000001";
@@ -181,4 +181,39 @@ test("agent public-key fingerprint remains stable and pairing state is non-secre
   const { s } = fixture(t);
   const fp = createHash("sha256").update(Buffer.from(s.keys.agent, "base64")).digest("hex");
   assert.match(fp, /^[a-f0-9]{64}$/);
+});
+
+const e2eReady = prerequisitesBuilt() ? false : "needs compiled mcp-commander and relay dependencies";
+
+test("account-pair installer lifecycle resumes a confirmed hosted identity, stays file-only, and doctor recognizes it", { skip: e2eReady }, t => {
+  const sb = makeSandbox();
+  t.after(sb.cleanup);
+  const invite = "abi1_" + "c".repeat(64);
+  const betaArgs = ["--beta-enroll", "--legacy-invite", "--relay-url", BASE, "--skip-deps", "--yes", "--non-interactive"];
+
+  let r = sb.run(betaArgs, { ASTRA_BETA_INVITE: invite }, { network: true });
+  assert.equal(r.status, 0, r.out);
+
+  const stateFile = path.join(sb.astraHome, "install-state.json");
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.equal(state.betaEnrollment.registered, true);
+  state.accountPairing = { ...state.betaEnrollment };
+  delete state.betaEnrollment;
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
+
+  r = sb.run(["--account-pair", "--skip-deps", "--yes", "--non-interactive"], {}, { network: true });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /existing account pairing verified by agent signature/);
+  assert.match(r.out, /Astra account pairing complete/);
+  assert.match(r.out, /file-only mode verified/);
+  assert.equal(fs.existsSync(sb.personal), false);
+
+  const remote = JSON.parse(fs.readFileSync(path.join(sb.remoteDir, "remote.json"), "utf8"));
+  assert.equal(remote.trustedTerminal, false);
+  assert.equal(remote.trustedGui, false);
+
+  r = sb.run(["doctor", "--offline"]);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /PASS  account pairing:/);
+  assert.doesNotMatch(r.out, /personal config.*missing/);
 });
