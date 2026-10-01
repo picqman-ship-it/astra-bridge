@@ -8,7 +8,7 @@ import path from 'node:path';
  *
  * Differences from the original that close real holes:
  *  - allowed directories are realpath'd too, so symlinked roots (/tmp -> /private/tmp) work;
- *  - comparison is case-insensitive only where the filesystem usually is (macOS, Windows);
+ *  - comparison uses the filesystem's canonical spelling, never platform-wide case folding;
  *  - symlinks inside an allowed dir that point outside it are rejected, because we compare
  *    the *resolved* target, never the requested spelling.
  */
@@ -19,12 +19,10 @@ export function expandHome(p: string): string {
   return p;
 }
 
-const caseInsensitive = process.platform === 'darwin' || process.platform === 'win32';
-
 function comparable(p: string): string {
   let out = path.normalize(p);
   if (out.length > 1 && out.endsWith(path.sep) && !/^[A-Za-z]:\\$/.test(out)) out = out.slice(0, -1);
-  return caseInsensitive ? out.toLowerCase() : out;
+  return out;
 }
 
 /**

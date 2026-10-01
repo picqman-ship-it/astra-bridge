@@ -17,9 +17,10 @@ export function isPlaceholder(value) {
   return typeof value !== "string" || value.trim() === "" || /REPLACE_WITH_|<your-|<[a-z-]+>|\bexample\.com\b/i.test(value);
 }
 
-export function validateDeviceId(raw) {
+export function validateDeviceId(raw, betaEnabled = false) {
   const v = String(raw ?? "").trim();
   if (!DEVICE_ID_RE.test(v)) throw new Error("device id must be 1-96 characters of letters, digits, '.', '_' or '-' (for example my-mac)");
+  if (betaEnabled && /^beta-/i.test(v)) throw new Error("the beta- prefix is reserved when BETA_REGISTRY_ENABLED=true");
   return v;
 }
 

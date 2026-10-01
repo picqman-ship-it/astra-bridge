@@ -29,6 +29,8 @@ export function createLaunchd({ launchctl, uid, label, run = defaultRun }) {
     },
     bootout: () => exec(["bootout", target]),
     enable: () => exec(["enable", target]),
+    /** Persists across logins: launchd does not load a disabled label until `enable`. */
+    disable: () => exec(["disable", target]),
     bootstrap: (plist) => exec(["bootstrap", `gui/${uid}`, plist]),
     kickstart: () => exec(["kickstart", "-k", target]),
     async waitUnloaded(timeoutMs = 15_000) {

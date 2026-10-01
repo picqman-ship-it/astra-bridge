@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { pinBetaRelease } from "../pin-beta-release.mjs";
 
 export const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const FAKE_ACCOUNT = "0123456789abcdef0123456789abcdef";
@@ -17,8 +18,36 @@ export function tmpDir(prefix = "astra-installer-") {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
+/** Sources whose compiled output in mcp-commander/dist is missing or older than the source. */
+export function staleCommanderBuild(commander = path.join(REPO, "mcp-commander")) {
+  const src = path.join(commander, "src");
+  const stale = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, e.name);
+      if (e.isDirectory()) walk(file);
+      else if (e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
+        const built = fs.statSync(path.join(commander, "dist", path.relative(src, file)).replace(/\.ts$/, ".js"), { throwIfNoEntry: false });
+        if (!built || built.mtimeMs < fs.statSync(file).mtimeMs) stale.push(path.relative(commander, file));
+      }
+    }
+  };
+  walk(src);
+  return stale;
+}
+
+/**
+ * The end-to-end tests run the installer against this checkout's compiled mcp-commander, which
+ * every sandbox symlinks. Without dependencies they are skipped; a dist/ older than its sources
+ * fails them (naming the fix) instead of silently testing an old build.
+ */
 export function prerequisitesBuilt() {
-  return fs.existsSync(path.join(REPO, "mcp-commander", "dist", "remote", "setup.js")) && fs.existsSync(path.join(REPO, "relay", "node_modules", "ws"));
+  if (!fs.existsSync(path.join(REPO, "mcp-commander", "dist", "remote", "setup.js")) || !fs.existsSync(path.join(REPO, "relay", "node_modules", "ws"))) return false;
+  const stale = staleCommanderBuild();
+  if (stale.length) {
+    throw new Error(`mcp-commander/dist is older than its sources (${stale.slice(0, 3).join(", ")}${stale.length > 3 ? ", …" : ""}); run: (cd mcp-commander && npm run build)`);
+  }
+  return true;
 }
 
 const FAKE_LAUNCHCTL = `#!/bin/sh
@@ -33,11 +62,17 @@ case "$1" in
     fi
     echo "Could not find service" >&2; exit 113 ;;
   bootstrap)
+    if [ -f "$FAKE_STATE_DIR/disabled" ]; then echo "Bootstrap failed: 119: Service is disabled" >&2; exit 119; fi
     if [ -f "$FAKE_STATE_DIR/loaded" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
     touch "$FAKE_STATE_DIR/loaded"; exit 0 ;;
   bootout)
     if [ -f "$FAKE_STATE_DIR/bootout-error" ]; then echo 'Input/output error' >&2; exit 5; fi
     rm -f "$FAKE_STATE_DIR/loaded"; exit 0 ;;
+  disable)
+    if [ -f "$FAKE_STATE_DIR/disable-error" ]; then echo 'Operation not permitted' >&2; exit 1; fi
+    touch "$FAKE_STATE_DIR/disabled"; exit 0 ;;
+  enable)
+    rm -f "$FAKE_STATE_DIR/disabled"; exit 0 ;;
   *) exit 0 ;;
 esac
 `;
@@ -88,6 +123,7 @@ export function makeSandbox({ homeName = "home" } = {}) {
   for (const d of [home, repo, state, bin]) fs.mkdirSync(d, { recursive: true });
 
   copyDir(path.join(REPO, "installer"), path.join(repo, "installer"), (n) => n === "node_modules");
+  pinBetaRelease(repo, "https://astra-bridge-relay.example-sub.workers.dev");
   fs.copyFileSync(path.join(REPO, "install-macos.sh"), path.join(repo, "install-macos.sh"));
   fs.chmodSync(path.join(repo, "install-macos.sh"), 0o755);
   fs.copyFileSync(path.join(REPO, ".gitignore"), path.join(repo, ".gitignore"));
@@ -135,6 +171,13 @@ export function makeSandbox({ homeName = "home" } = {}) {
     calls: () => (fs.existsSync(path.join(state, "calls.log")) ? fs.readFileSync(path.join(state, "calls.log"), "utf8") : ""),
     deploys: () => Number(fs.existsSync(path.join(state, "deploys")) ? fs.readFileSync(path.join(state, "deploys"), "utf8") : 0),
     flag: (name, on = true) => (on ? fs.writeFileSync(path.join(state, name), "") : fs.rmSync(path.join(state, name), { force: true })),
+    /** What launchd does at the next login: load our LaunchAgent unless its label is disabled. */
+    login() {
+      if (fs.existsSync(sb.plist) && !fs.existsSync(path.join(state, "disabled"))) fs.writeFileSync(path.join(state, "loaded"), "");
+      return fs.existsSync(path.join(state, "loaded"));
+    },
+    loaded: () => fs.existsSync(path.join(state, "loaded")),
+    disabled: () => fs.existsSync(path.join(state, "disabled")),
     cleanup: () => fs.rmSync(base, { recursive: true, force: true }),
   };
   return sb;

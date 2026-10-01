@@ -119,7 +119,7 @@ test("lookup errors and legacy deployment records never authorize replacing a Wo
   assert.equal(sb.deploys(), 1, "an old accountless record grants no ownership");
 });
 
-test("file-only revocation survives interruption before restart and is applied only after resumed verified restart", { skip }, (t) => {
+test("file-only revocation stops local authority before a network checkpoint, and resumes with verified restart", { skip }, (t) => {
   const sb = makeSandbox(); t.after(sb.cleanup);
   let r = sb.run([...ARGS, "--enable-terminal"], {}, { network: true });
   assert.equal(r.status, 0, r.out);
@@ -131,7 +131,9 @@ test("file-only revocation survives interruption before restart and is applied o
   r = sb.run([...ARGS, "--file-only"]);
   assert.equal(r.status, 3, r.out);
   assert.equal(JSON.parse(fs.readFileSync(ctx.remoteConfigFile)).trustedTerminal, false);
-  assert.match(r.out, /previous permissions until restart is verified/);
+  assert.match(r.out, /agent stopped and disabled at login/);
+  assert.equal(fs.existsSync(path.join(sb.state, "loaded")), false, "old authority cannot survive login failure");
+  assert.equal(sb.login(), false, "nor come back at the next login");
   assert.equal(readState(ctx).runtime.applied, old);
   assert.ok(readState(ctx).runtime.pending);
   assert.equal(boots(sb), before);
@@ -140,6 +142,7 @@ test("file-only revocation survives interruption before restart and is applied o
   r = sb.run(ARGS, {}, { network: true });
   assert.equal(r.status, 0, r.out);
   assert.equal(boots(sb), before + 1);
+  assert.equal(sb.disabled(), false, "re-enabled only for the restart it verified");
   assert.notEqual(readState(ctx).runtime.applied, old);
   assert.equal(readState(ctx).runtime.pending, null);
 });

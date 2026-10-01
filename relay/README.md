@@ -87,6 +87,12 @@ After Access JWT verification, the Worker calls `mcpRpc` on the `DeviceRelay` Du
 
 The repository also contains an optional multi-device registry (`beta-registry.ts`, `agent-auth.ts`, `migrations/`, `wrangler.beta.example.jsonc`). It stays inert unless you enable it with `BETA_REGISTRY_ENABLED` and a D1 database, and even then its principals are refused on `/mcp` and cannot reach your configured device. You can ignore it for a single-Mac setup.
 
+Authenticated beta principals use `/beta/mcp`, with a beta-only authenticator, explicit file-tool allowlist, metadata-only audit and mandatory provider rate bindings before D1. Beta UUIDs cannot share personal device namespaces. Personal credentials are refused on that route; personal `/mcp` behavior is unchanged.
+
+Compatibility note: existing personal `beta-*` IDs remain valid while `BETA_REGISTRY_ENABLED` is disabled. Rename them before enabling beta; the enabled registry reserves the entire prefix even if D1 is misconfigured. Installer doctor exposes this condition. Beta rate admission now needs six bindings with client-first checks and separate enrollment, agent and MCP budgets; merge the updated example into ignored `wrangler.beta.local.jsonc` before a separately authorized rollout.
+
+Invited testers can use the [closed-beta device enrollment flow](docs/BETA-ENROLLMENT.md), separately gated by `BETA_ENROLLMENT_ENABLED` (off by default; onboarding windows only). A private relay-bound invite artifact and versioned key-possession proof register a file-only device without Cloudflare credentials or a connector token. Operator tooling binds subsequent connector authorization to the redeemed device ID and tester-confirmed full agent fingerprint.
+
 ## Limits and failure handling
 
 | Area | Behavior |

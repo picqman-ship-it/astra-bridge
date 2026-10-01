@@ -13,8 +13,10 @@ import { isVersionedPath } from "./node-path.mjs";
 import { MIN_NODE_MAJOR, checkPrereqs, parseVersion } from "./prereqs.mjs";
 import { probeAccess, probeAgentStatus, probeHealth } from "./relay-probe.mjs";
 import { run, shQuote } from "./util.mjs";
-import { readState } from "./state.mjs";
+import { readState, runtimeFingerprint } from "./state.mjs";
 import { readPersonalConfig } from "./wrangler-config.mjs";
+import { offboardingState } from "./offboarding.mjs";
+import { probeBetaStatus } from "./beta-enrollment.mjs";
 
 /** The last meaningful status line the agent (or its mcp-commander child) logged. */
 export function lastAgentEvent(logText) {
@@ -82,6 +84,16 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
     if (!protectsCheckout(ctx, commander.raw)) add("workspace", "checkout protection", "warn", `${ctx.repoDir} is not in protectedPaths (the agent still protects relay/)`, "./install-macos.sh adds it");
     if (cfg.trustedGui && !fs.existsSync(axHelperPath(ctx.commanderDir))) add("workspace", "GUI helper", "fail", "trustedGui is on but the Accessibility helper is not built", "xcode-select --install, then ./install-macos.sh");
   }
+  const offboarded = offboardingState(ctx.commanderRemoteDir);
+  if (offboarded === "incomplete") {
+    add("workspace", "durable jobs", "fail",
+      `an earlier revocation or uninstall could not confirm that recorded durable-job processes stopped; they may still run (records in ${path.join(ctx.commanderRemoteDir, "durable")})`,
+      "Resolve what that run reported, then re-run ./install-macos.sh (every run retries the verified shutdown first)");
+  } else if (offboarded === "complete") {
+    const terminal = commander.cfg?.trustedTerminal === true;
+    add("workspace", "durable jobs", terminal ? "warn" : "pass", "disabled by an earlier revocation or uninstall; its tracked jobs were verified stopped",
+      terminal ? "job_start stays refused until ./install-macos.sh --enable-terminal" : undefined);
+  }
 
   // --- keys
   const keys = inspectKeys(ctx.astraHome);
@@ -95,10 +107,22 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
 
   // --- personal Cloudflare config
   const personal = readPersonalConfig(ctx.personalConfig);
-  const v = personal.values ?? {};
-  if (!personal.exists) add("cloudflare", "personal config", "fail", `${ctx.personalConfig} missing`, "./install-macos.sh");
+  const beta = readState(ctx).betaEnrollment;
+  const v = beta ? { relayUrl: beta.relayUrl, deviceId: beta.deviceId } : personal.values ?? {};
+  if (beta) {
+    const valid = beta.registered === true && beta.agentPublicKeyB64 === keys.agent.publicKeyB64
+      && commander.cfg?.trustedTerminal === false && commander.cfg?.trustedGui === false && !personal.exists;
+    add("beta", "device registration", valid ? "pass" : "fail", valid ? "public identity matches local keys; file-only configuration" : "beta identity or file-only configuration is not verified", valid ? undefined : "./install-macos.sh --beta-enroll");
+  }
+  else if (!personal.exists) add("cloudflare", "personal config", "fail", `${ctx.personalConfig} missing`, "./install-macos.sh");
   else if (personal.error) add("cloudflare", "personal config", "fail", personal.error);
   else {
+    const betaEnabled = personal.data?.vars?.BETA_REGISTRY_ENABLED === "true";
+    const reserved = ["AGENT_DEVICE_ID", "CLIENT_DEVICE_ID", "MCP_DEVICE_ID"]
+      .some(name => /^beta-/i.test(personal.data?.vars?.[name] ?? ""));
+    if (reserved) add("cloudflare", "personal beta- namespace", betaEnabled ? "fail" : "warn",
+      betaEnabled ? "personal beta- IDs are reserved with BETA_REGISTRY_ENABLED=true; rename before enabling beta"
+        : "legacy personal beta- ID preserved while beta registry is disabled; rename before enabling beta");
     const missing = ["agentKey", "clientKey", "deviceId", "workerName", "email"].filter((k) => !v[k]);
     add("cloudflare", "personal config", missing.length || personal.problems.length ? "fail" : "pass",
       missing.length ? `not set: ${missing.join(", ")}` : personal.problems.length ? personal.problems.join("; ") : `worker ${v.workerName}, device ${v.deviceId}, owner email set`,
@@ -122,6 +146,7 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
   } catch {}
   const plistFile = path.join(ctx.launchAgentsDir, `${label}.plist`);
   const launchd = createLaunchd({ launchctl: ctx.launchctl, uid: ctx.uid, label });
+  let runtimeStatus;
   if (!fs.existsSync(plistFile)) add("agent", "LaunchAgent", "fail", `${plistFile} not installed`, "./install-macos.sh");
   else {
     const plist = readPlist(plistFile);
@@ -144,12 +169,34 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
       }
     }
     const st = launchd.status();
+    runtimeStatus = st;
     if (st.loaded === null) add("agent", "launchd", "fail", `UNKNOWN: ${st.error}`);
-    else if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", `launchctl bootstrap gui/${ctx.uid} ${shQuote(plistFile)}   (or ./install-macos.sh)`);
+    else if (!st.loaded) add("agent", "launchd", "fail", "not loaded (the agent is not running)", "./install-macos.sh (restarts and verifies it; a revocation or uninstall keeps it disabled at login until then)");
     else if (st.state !== "running") add("agent", "launchd", "fail", `loaded but ${st.state ?? "not running"}, last exit ${st.lastExitCode ?? "?"}`, `See ${path.join(ctx.astraHome, "agent.stderr.log")}`);
     else add("agent", "launchd", "pass", `running, pid ${st.pid ?? "?"}`);
   }
-  if (readState(ctx).runtime?.pending) add("agent", "runtime changes", "fail", "restart/readiness verification pending", "./install-macos.sh");
+  const runtime = readState(ctx).runtime;
+  let runtimeVerified = false;
+  let runtimeProblem = "applied runtime identity is missing or no longer running";
+  try {
+    runtimeVerified = Boolean(runtimeStatus?.loaded === true && runtimeStatus.state === "running"
+      && runtimeStatus.pid && runtimeStatus.pid === runtime?.pid && !runtime?.pending
+      && runtime?.applied === runtimeFingerprint(ctx, fs.readFileSync(plistFile, "utf8")));
+    if (!runtimeVerified) runtimeProblem = "runtime/config inputs differ or restart/readiness verification is pending; running authority is UNKNOWN";
+  } catch (err) { runtimeProblem = `runtime inputs cannot be verified: ${err.message}; running authority is UNKNOWN`; }
+  if (runtimeStatus?.loaded === false) runtimeProblem = "the agent is not running; its next start is unverified until ./install-macos.sh restarts and checks it";
+  add("agent", "runtime changes", runtimeVerified ? "pass" : "fail",
+    runtimeVerified ? "running PID and applied runtime fingerprint match current inputs" : runtimeProblem,
+    runtimeVerified ? undefined : "./install-macos.sh (or --file-only to stop broader authority locally first)");
+  if (!runtimeVerified) {
+    const mode = checks.find((c) => c.group === "workspace" && c.name === "access mode");
+    if (mode) {
+      mode.level = "fail";
+      mode.detail = runtimeStatus?.loaded === false
+        ? "none active through the agent (it is not running); the configured permissions apply only after a verified restart"
+        : "configured permissions are not verified as active; running authority is UNKNOWN";
+    }
+  }
   const ours = fs.existsSync(plistFile);
   for (const other of findOtherAgents(ctx.launchAgentsDir, label)) {
     const clash = ours && conflicts(other, v.relayUrl, v.deviceId);
@@ -166,11 +213,11 @@ export async function doctor(ctx, { offline = false, fetchImpl = fetch } = {}) {
   else if (v.relayUrl) {
     const h = await probeHealth(v.relayUrl, { fetchImpl });
     add("relay", "health", h.ok ? "pass" : "fail", h.ok ? `${v.relayUrl}/healthz OK` : `${v.relayUrl}/healthz: ${h.error}`, h.ok ? undefined : "Deployed? ./install-macos.sh --redeploy");
-    if (h.ok && v.deviceId && keys.client.ok) {
-      const st = await probeAgentStatus(v.relayUrl, v.deviceId, path.join(ctx.astraHome, KEY_FILES.client), { fetchImpl });
+    if (h.ok && v.deviceId && (beta ? keys.agent.ok : keys.client.ok)) {
+      const st = await (beta ? probeBetaStatus : probeAgentStatus)(v.relayUrl, v.deviceId, path.join(ctx.astraHome, beta ? KEY_FILES.agent : KEY_FILES.client), { fetchImpl });
       if (!st.ok) {
         add("relay", "agent connection", "fail", `signed status request refused: ${st.error}`,
-          st.status === 401 || st.status === 403 ? "The deployed Worker has other keys or another device id: ./install-macos.sh --redeploy" : undefined);
+          beta ? "Re-run ./install-macos.sh --beta-enroll or contact the operator" : st.status === 401 || st.status === 403 ? "The deployed Worker has other keys or another device id: ./install-macos.sh --redeploy" : undefined);
       } else {
         const ready = st.agentConnected && st.mcpHealthy;
         add("relay", "agent connection", ready ? "pass" : "fail",

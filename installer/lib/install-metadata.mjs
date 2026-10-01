@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { readPlist } from "./launchd.mjs";
-import { inspectKeyDir } from "./keys.mjs";
+import { inspectKeyDir, inspectKeys, KEY_FILES } from "./keys.mjs";
+import { readPersonalConfig } from "./wrangler-config.mjs";
 import { InstallerError, sha256, writeFileAtomic } from "./util.mjs";
 
 export const metadataFile = (ctx) => path.join(ctx.home, ".config", "astra-bridge", "install.json");
@@ -35,14 +36,21 @@ function validate(ctx, data, plistFile) {
   if (ctx.customAstraHome && ctx.astraHome !== data.astraHome) fail("ASTRA_HOME differs from the installation");
   if (ctx.customRemoteDir && ctx.commanderRemoteDir !== data.commanderRemoteDir) fail("ASTRA_COMMANDER_REMOTE_DIR differs from the installation");
   if (!/^[0-9a-f]{64}$/.test(data.plistHash ?? "")) fail("missing plist fingerprint");
+  if (data.partialFiles !== undefined) {
+    const allowed = new Set([...Object.values(KEY_FILES).map((f) => path.join(data.astraHome, f)),
+      path.join(data.astraHome, "install-state.json"), data.personalConfig, metadataFile(ctx)]);
+    if (data.plistHash !== sha256("") || !Array.isArray(data.partialFiles)
+      || !data.partialFiles.every((f) => allowed.has(f))) fail("invalid partial-install cleanup inventory");
+  }
   const keys = inspectKeyDir(data.astraHome);
   if (keys.exists && !keys.ok) fail(keys.problems.join("; "));
   return data;
 }
 
-export function recordInstallation(ctx, plistFile, plist) {
+export function recordInstallation(ctx, plistFile, plist, { partialFiles } = {}) {
   const data = { version: 1, home: ctx.home, repoDir: ctx.repoDir, astraHome: ctx.astraHome,
-    commanderRemoteDir: ctx.commanderRemoteDir, personalConfig: ctx.personalConfig, plistFile, plistHash: sha256(plist) };
+    commanderRemoteDir: ctx.commanderRemoteDir, personalConfig: ctx.personalConfig, plistFile, plistHash: sha256(plist),
+    ...(partialFiles ? { partialFiles } : {}) };
   validate(ctx, data, plistFile);
   const file = metadataFile(ctx);
   realDirectoryChain(path.dirname(file));
@@ -52,6 +60,37 @@ export function recordInstallation(ctx, plistFile, plist) {
   if (fs.lstatSync(file, { throwIfNoEntry: false })) regularOwned(file, true);
   writeFileAtomic(file, `${JSON.stringify(data, null, 2)}\n`);
   return data;
+}
+
+/** Persist ownership before a first install can create keys/config and then hit a checkpoint. */
+export async function recordPreparation(ctx) {
+  const { readTemplate } = await import(pathToFileURL(ctx.installAgent).href);
+  const plistFile = path.join(ctx.launchAgentsDir, `${readTemplate().label}.plist`);
+  if (fs.lstatSync(metadataFile(ctx), { throwIfNoEntry: false }) || fs.lstatSync(plistFile, { throwIfNoEntry: false })) return;
+  // A failed first attempt owns only reserved files that did not exist before it. In particular,
+  // inherited ASTRA_HOME must never turn unrelated pre-existing files into purge targets.
+  const partialFiles = [...Object.values(KEY_FILES).map((f) => path.join(ctx.astraHome, f)),
+    ctx.stateFile, ctx.personalConfig, metadataFile(ctx)].filter((f) => !fs.lstatSync(f, { throwIfNoEntry: false }));
+  recordInstallation(ctx, plistFile, "", { partialFiles });
+}
+
+/** Legacy interrupted installs have no locator: accept only fixed defaults with matching keys. */
+function legacyPartialPaths(ctx, plistFile) {
+  if (ctx.astraHome !== path.join(ctx.home, ".astra-bridge")
+    || ctx.commanderRemoteDir !== path.join(ctx.home, ".mcp-commander-remote")) {
+    fail("no installation evidence for custom paths; refusing to guess");
+  }
+  realDirectoryChain(ctx.astraHome);
+  realDirectoryChain(path.dirname(ctx.personalConfig));
+  const keys = inspectKeys(ctx.astraHome);
+  const personal = readPersonalConfig(ctx.personalConfig);
+  if (!keys.dir.ok || !keys.agent.ok || !keys.client.ok || personal.error
+    || personal.values?.agentKey !== keys.agent.publicKeyB64 || personal.values?.clientKey !== keys.client.publicKeyB64) {
+    fail("no install metadata or installed plist, and no matching owner-only default keys/config for partial cleanup");
+  }
+  return { astraHome: ctx.astraHome, commanderRemoteDir: ctx.commanderRemoteDir,
+    personalConfig: ctx.personalConfig, plistFile,
+    partialFiles: [...Object.values(KEY_FILES).map((f) => path.join(ctx.astraHome, f)), ctx.personalConfig] };
 }
 
 export async function installedPaths(ctx, plistFile, { read = readPlist } = {}) {
@@ -65,7 +104,7 @@ export async function installedPaths(ctx, plistFile, { read = readPlist } = {}) 
     validate(ctx, saved, plistFile);
   }
   if (!fs.lstatSync(plistFile, { throwIfNoEntry: false })) {
-    if (!saved) fail("no install metadata or installed plist; re-run setup before purging");
+    if (!saved) return legacyPartialPaths(ctx, plistFile);
     return saved;
   }
   const text = regularOwned(plistFile);
@@ -91,6 +130,6 @@ export async function installedPaths(ctx, plistFile, { read = readPlist } = {}) 
   if (expected !== text) fail("plist differs from the installer template");
   const derived = validate(ctx, { version: 1, home: ctx.home, repoDir: ctx.repoDir, astraHome,
     commanderRemoteDir: remoteDir, personalConfig: ctx.personalConfig, plistFile, plistHash: sha256(text) }, plistFile);
-  if (saved && Object.keys(derived).some((k) => derived[k] !== saved[k])) fail("plist and install metadata mismatch");
+  if (saved && Object.keys(derived).some((k) => !(k === "plistHash" && saved.partialFiles) && derived[k] !== saved[k])) fail("plist and install metadata mismatch");
   return derived;
 }

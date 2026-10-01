@@ -20,7 +20,7 @@ Every step first looks at the real state and only does what is missing, so runni
 2. **Dependencies**: `npm ci` in `mcp-commander/` and `relay/` (exact versions from `package-lock.json`; skipped when a stamp shows they are already installed from the same lockfile for the same CPU architecture). Build fingerprints cover TypeScript, native sources, build scripts, package/TypeScript configuration, output, Node/CPU and Swift/SDK identity. Any change or missing stamp rebuilds mcp-commander. The native compiler target follows Node's architecture.
 3. **Workspace**: creates `~/remote-workspace` (0700; `--workspace` to choose another) and writes `~/.mcp-commander-remote/remote.json` with mcp-commander's own `remote:setup` in **file-only mode**, protecting this whole checkout (`--protect <checkout>`). An existing `remote.json` is kept as is. The installer only adds the checkout protection to it and changes the terminal/GUI flags when you ask.
 4. **Keys**: runs `relay/scripts/keygen.mjs` when no keys exist (directory 0700, files 0600, never overwritten), then checks both keys. Private keys are never printed. A readable key or a half pair stops the installer with the exact fix.
-5. **Personal Cloudflare config**: creates `relay/wrangler.personal.jsonc` (gitignored, 0600) from the committed template and fills in only the public keys, the device id, the worker name, your email (`ACCESS_ALLOWED_EMAILS`) and later the relay URL and Access values. Comments and anything else you add are preserved. It refuses to write if git would not ignore the file.
+5. **Personal Cloudflare config**: creates `relay/wrangler.personal.jsonc` (gitignored, 0600) from the committed template and fills in only the public keys, the device id, the worker name, your email (`ACCESS_ALLOWED_EMAILS`) and later the relay URL and Access values. Comments and anything else you add are preserved, including an `ACCESS_ALLOWED_EMAILS` list of several addresses. The Worker compares the device ids, `OAUTH_ISSUER` and `OAUTH_RESOURCE` verbatim, so values that are only equal after trimming are rewritten in exact form (doctor reports them until then). It refuses to write if git would not ignore the file.
 6. **Cloudflare login**: `wrangler whoami`; if you are not logged in, it offers `wrangler login` (browser) or stops at a checkpoint. One effective account is selected from `--account-id`, `CLOUDFLARE_ACCOUNT_ID` (legacy `CF_ACCOUNT_ID`), personal `account_id`, remembered selection, or a single available account, in that order. Ambiguity stops for a selection. The effective account is pinned in the config and environment for both lookup and deploy; inherited Wrangler environments cannot silently change the target.
 7. **Deploy**: ownership and deployment fingerprints identify both the account and Worker name. Switching either, or resuming an old record without an account, requires a fresh existence check. Unknown lookup results never authorize replacement; an existing Worker requires `--replace-existing-worker` or typing its name. Then `wrangler deploy --dry-run`, `wrangler deploy`, and `/healthz`. Later runs deploy when the personal config, Worker sources or lockfile changed (or with `--redeploy`).
 8. **Agent**: renders the LaunchAgent with `relay/scripts/install-agent.mjs`, shows what it will run, asks, writes it with the same script, and loads it with `launchctl bootstrap` in your user session. The Node path is a stable name that resolves to the running Node (for Homebrew `/opt/homebrew/bin/node` or `<prefix>/opt/<formula>/bin/node` instead of a versioned `Cellar` path), so it survives upgrades on Apple silicon and Intel alike. It then waits until the relay reports the agent connected. It stops instead if another LaunchAgent already runs an agent for the same relay and device.
@@ -47,13 +47,17 @@ Off by default and never turned on implicitly. `--enable-terminal` / `--enable-g
 
 ## Doctor
 
-`./install-macos.sh doctor [--offline] [--json]` changes nothing. It checks the prerequisites, dependencies and build, `remote.json` (with mcp-commander's own validator, as the agent would load it) and its mode, key permissions and type, that the personal config matches this Mac's keys and holds no placeholders, the LaunchAgent (valid plist, Node still present and 22+, agent file present, same relay and device as the config), `launchctl` state, conflicting LaunchAgents, the agent's last log event, and, unless `--offline`, the relay's `/healthz`, a signed status request (is the agent connected?) and the Access check. It exits 1 on any failure. The output contains paths and your relay URL but no keys and no email.
+`./install-macos.sh doctor [--offline] [--json]` changes nothing. It checks the prerequisites, dependencies and build, `remote.json` (with mcp-commander's own validator, as the agent would load it) and its mode, key permissions and type, that the personal config matches this Mac's keys and holds no placeholders, the LaunchAgent (valid plist, Node still present and 22+, agent file present, same relay and device as the config), `launchctl` state, whether the running agent still matches the applied runtime fingerprint, whether an earlier durable-job shutdown is unconfirmed, conflicting LaunchAgents, the agent's last log event, and, unless `--offline`, the relay's `/healthz`, a signed status request (is the agent connected?) and the Access check. It exits 1 on any failure. The output contains paths and your relay URL but no keys and no email.
 
 ## Uninstall
 
-`./install-macos.sh uninstall` stops the agent (`launchctl bootout`) and removes its LaunchAgent file. Keys, `remote.json`, the personal config, your workspace and the deployed Worker are kept, and the commands to remove them are printed. `--dry-run` shows the plan. `--purge` additionally deletes exactly these files: the two private keys, the agent logs and the installer state in `~/.astra-bridge`, and `relay/wrangler.personal.jsonc`. It never deletes a directory tree, the workspace or `remote.json`, and it asks you to type `delete` (or needs `--yes` when not interactive). To cut remote access immediately, also disable the Access application or delete the Worker.
+`./install-macos.sh uninstall` stops the agent (`launchctl bootout`) and disables it at login (`launchctl disable`), then disables durable job submissions, cancels queued jobs and verifies that the recorded worker and job process groups are gone before it removes the LaunchAgent file (then it lifts the login block: nothing is left to load). Unknown identities, malformed records or failed stops end the run early and keep keys, config, job records and the LaunchAgent file, but the agent stays stopped and does not start again at login. Re-run it once the reported item is resolved. Previously launched programs that detached from tracked groups require separate local inspection. Keys, `remote.json`, job records, your workspace and the deployed Worker are kept. `--dry-run` shows the plan without stopping anything. `--purge` additionally deletes the two private keys, agent logs, installer state and personal relay config from validated installation paths. It never deletes a directory tree, workspace, `remote.json` or job records, and requires typing `delete` (or `--yes`). Explicit `--enable-terminal` permits new jobs after a confirmed shutdown; cancelled work stays cancelled.
 
-For custom installations, paths come from the validated installed plist and the owner-only locator `~/.config/astra-bridge/install.json`, which survives ordinary uninstall and is removed by purge. Purge works after custom environment overrides are unset; conflicting overrides, mismatched metadata/plists, and missing installation evidence are refused. Paths must use real directory components. Inspection errors, timeouts and failed shutdowns are UNKNOWN: uninstall/purge removes nothing until shutdown is confirmed.
+Emergency procedure: run `./install-macos.sh uninstall --yes` locally, then delete the relay Worker through Workers & Pages in the correct Cloudflare account (or rotate both agent/client signing keys and redeploy with the agent stopped). Access protects `/mcp` only; disabling Access does **not** revoke signed `/v1/device/*` RPC. Remove the connector and Access application afterwards. Dashboard deletion does not depend on a config file that purge may already have deleted.
+
+For custom installations, paths come from the validated installed plist and the owner-only locator `~/.config/astra-bridge/install.json`, which is now written before first-install keys/config, survives ordinary uninstall and is removed by purge. A partial-install inventory covers only reserved files absent before setup; pre-existing files are never adopted for partial cleanup. Purge works after custom environment overrides are unset; conflicting overrides and mismatched metadata/plists are refused. Legacy partial installs without either locator or plist can purge only default-path, owner-only Ed25519 keys and a personal config whose public keys match; unproven paths and unrelated files are kept. Paths must use real directory components. Inspection errors, timeouts and failed shutdowns are UNKNOWN: no purge occurs until shutdown is confirmed.
+
+`--file-only` and `--reconfigure` apply their reduction locally before any dependency download, build, Cloudflare login or deployment: first `remote.json` loses the terminal/GUI access the run does not keep (it is only ever removed, so no later start regains it: not a KeepAlive restart, the next login or a resumed run without flags), then the agent is stopped and disabled at login, then tracked durable jobs are stopped. Setup re-enables the agent only for a restart it then verifies. A shutdown that cannot be verified stops the run and is reported as UNKNOWN or UNCONFIRMED, never as done. Every later run retries an unconfirmed durable-job shutdown first; until it is confirmed, `--enable-terminal` is refused before `remote.json` changes and no run reports setup complete. Doctor compares the applied runtime fingerprint and running PID with current config, keys, code and launch inputs; an unset pending flag alone never proves the current permissions are active.
 
 ## Tests
 
@@ -62,6 +66,8 @@ For custom installations, paths come from the validated installed plist and the 
 (cd relay && npm ci)
 (cd installer && npm test)
 ```
+
+`npm test` builds mcp-commander first (the sandboxes use this checkout's build). Missing dependencies or beta end-to-end prerequisites fail the gate; a stale build also fails rather than silently testing old code.
 
 The tests never touch your real `~/.astra-bridge`, `~/.mcp-commander-remote`, `~/Library/LaunchAgents`, launchd or Cloudflare account. End-to-end runs use a temporary `HOME`, a copy of the checkout, and fake `launchctl`/`wrangler` (`ASTRA_LAUNCHCTL`, `ASTRA_WRANGLER`). The installer refuses to use the real `launchctl` when `HOME` is not your real home directory. Network probes use injected transports, including a test-only preload for complete CLI readiness checks; they make no external requests.
 
@@ -76,3 +82,29 @@ There is deliberately no `.pkg` yet:
 - The dependencies include per-architecture binaries (ripgrep, esbuild/workerd, the compiled Accessibility helper), so a package would have to be built and tested per architecture or as a universal bundle, together with a pinned Node.js runtime.
 
 Signed/notarized release blockers: a Developer ID certificate and notarization credentials, a decision on bundling Node.js, universal (arm64 + x86_64) builds of the native pieces, and hardened-runtime signing of the Accessibility helper so its Accessibility permission stays stable across updates.
+
+## Invited beta enrollment
+
+Use `./install-macos.sh --beta-enroll --invite-file /path/to/invite.json`
+on a fresh tester installation using the operator's release with its pinned relay
+origin. The source trust template fails closed until the offline
+`pin-beta-release.mjs` release step is performed; see the operator guide below.
+The 0600 invite artifact must match that independent release pin. The installer
+generates a beta UUID, proves agent-key
+possession, forces one-workspace file-only mode and skips Cloudflare credentials,
+email and deployment. Confirm the displayed device ID and full agent fingerprint
+with the operator before connector authorization. Re-run with `--beta-enroll` to
+resume. Uninstall/purge does not revoke the server device/token: ask the operator
+to revoke them, purge the old keys, then enroll with a fresh artifact. Environment
+or hidden-prompt input requires warned `--legacy-invite` compatibility opt-in.
+See [operator setup, revocation and pairing contract](../relay/docs/BETA-ENROLLMENT.md).
+
+Pending correction/reset first tries signed recovery with the old ID/key. If a
+definitive denial requires a new ID, its unconfirmed agent key is rotated too;
+confirmed identity/key remains immutable. Enrollment messages distinguish 403
+possible invite consumption, 404 closed enrollment, temporary 429/503 and unknown
+network/timeout outcomes. Repeated runs recover committed lost responses.
+
+Personal compatibility: existing `beta-*` IDs keep working with the beta registry
+disabled. Doctor flags these IDs so the operator can rename them before setting
+`BETA_REGISTRY_ENABLED=true`, which enforces the reserved namespace.

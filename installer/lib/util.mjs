@@ -89,11 +89,6 @@ export function octal(m) {
   return (m & 0o777).toString(8).padStart(4, "0");
 }
 
-export function isWithin(parent, child) {
-  const rel = path.relative(parent, child);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
-}
-
 export function expandHome(p, home) {
   if (p === "~") return home;
   if (p.startsWith("~/")) return path.join(home, p.slice(2));

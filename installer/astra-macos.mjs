@@ -10,6 +10,7 @@ import { install } from "./lib/install.mjs";
 import { createUi } from "./lib/ui.mjs";
 import { uninstall } from "./lib/uninstall.mjs";
 import { Checkpoint, EXIT, InstallerError } from "./lib/util.mjs";
+import { normalizeRelayUrl, normalizeTeamDomain, validateDeviceId, validateEmail, validatePolicyAud, validateWorkerName } from "./lib/validate.mjs";
 
 const USAGE = `Astra Bridge for macOS
 
@@ -37,6 +38,10 @@ Install options:
   --replace-existing-worker allow deploying over a Worker this Mac did not deploy
   --skip-deps               do not run npm ci / npm run build
   --skip-cloudflare         local setup only (no login, deploy or Access steps)
+  --beta-enroll             invited beta: file-only, no Cloudflare login
+  --invite-file <path>      operator's relay-bound private 0600 invite.json
+  --legacy-invite           warned compatibility: hidden prompt / ASTRA_BETA_INVITE
+  --reset-pending-identity  recover old beta ID first; otherwise rotate pending ID/key
   --no-network-checks       do not contact the relay (alias --offline)
   --yes, -y                 accept confirmations (never enables terminal/GUI by itself)
   --non-interactive         never prompt; missing answers stop at a checkpoint
@@ -45,6 +50,7 @@ Exit codes: 0 done, 1 failed, 2 usage error, 3 checkpoint (an action for you; re
 `;
 
 const VALUE_FLAGS = {
+  "--invite-file": "inviteFile",
   "--workspace": "workspace",
   "--email": "email",
   "--device-id": "deviceId",
@@ -55,6 +61,9 @@ const VALUE_FLAGS = {
   "--account-id": "accountId",
 };
 const BOOL_FLAGS = {
+  "--legacy-invite": "legacyInvite",
+  "--reset-pending-identity": "resetPendingIdentity",
+  "--beta-enroll": "betaEnroll",
   "--enable-terminal": "enableTerminal",
   "--enable-gui": "enableGui",
   "--file-only": "fileOnly",
@@ -75,7 +84,7 @@ const BOOL_FLAGS = {
   "-h": "help",
 };
 const ALLOWED = {
-  install: new Set([...Object.values(VALUE_FLAGS), "enableTerminal", "enableGui", "fileOnly", "reconfigure", "redeploy", "replaceExistingWorker", "skipDeps", "skipCloudflare", "noNetworkChecks", "yes", "nonInteractive", "help"]),
+  install: new Set([...Object.values(VALUE_FLAGS), "betaEnroll", "legacyInvite", "resetPendingIdentity", "enableTerminal", "enableGui", "fileOnly", "reconfigure", "redeploy", "replaceExistingWorker", "skipDeps", "skipCloudflare", "noNetworkChecks", "yes", "nonInteractive", "help"]),
   doctor: new Set(["noNetworkChecks", "json", "help", "nonInteractive"]),
   uninstall: new Set(["purge", "dryRun", "yes", "nonInteractive", "help"]),
 };
@@ -83,13 +92,14 @@ const ALLOWED = {
 export class UsageError extends Error {}
 
 export function parseArgs(argv) {
+  if (argv.some(value => /abi1_[a-f0-9]{64}/i.test(value))) throw new UsageError("invite secrets are never accepted on the command line");
   const opts = {};
   let command = "install";
   let i = 0;
   if (argv[0] && !argv[0].startsWith("-")) {
     command = argv[0];
     i = 1;
-    if (!(command in ALLOWED)) throw new UsageError(`unknown command: ${command}`);
+    if (!(command in ALLOWED)) throw new UsageError("unknown command (value redacted)");
   }
   for (; i < argv.length; i++) {
     let a = argv[i];
@@ -99,17 +109,18 @@ export function parseArgs(argv) {
       inline = a.slice(eq + 1);
       a = a.slice(0, eq);
     }
-    if (/^--(token|secret|password|api-key|bearer|private-key)/i.test(a)) {
-      throw new UsageError("secrets are never accepted on the command line; the installer does not need any");
+    if ((a !== "--invite-file" && /^--(token|secret|password|api-key|bearer|private-key|invite|beta-invite)/i.test(a)) || /abi1_[a-f0-9]{64}/.test(argv[i])) {
+      throw new UsageError("secrets are never accepted on the command line; use --invite-file");
     }
     if (a in VALUE_FLAGS) {
       const v = inline ?? argv[++i];
+      if (/abi1_[a-f0-9]{64}/.test(v ?? "")) throw new UsageError("secrets are never accepted on the command line; use --invite-file");
       if (v === undefined || v === "" || (inline === undefined && v.startsWith("--"))) throw new UsageError(`${a} needs a value`);
       opts[VALUE_FLAGS[a]] = v;
     } else if (a in BOOL_FLAGS && inline === undefined) {
       opts[BOOL_FLAGS[a]] = true;
     } else {
-      throw new UsageError(`unknown option: ${argv[i]}`);
+      throw new UsageError("unknown option (values redacted)");
     }
   }
   for (const key of Object.keys(opts)) {
@@ -119,7 +130,17 @@ export function parseArgs(argv) {
     }
   }
   if (opts.fileOnly && (opts.enableTerminal || opts.enableGui)) throw new UsageError("--file-only cannot be combined with --enable-terminal / --enable-gui");
+  if (opts.betaEnroll && opts.deviceId !== undefined) throw new UsageError("beta device IDs are generated; --device-id is not allowed");
   if (opts.accountId && !/^[a-f0-9]{32}$/.test(opts.accountId)) throw new UsageError("--account-id must be the 32-character hex account id");
+  for (const [flag, key, validate] of [
+    ["--device-id", "deviceId", validateDeviceId], ["--email", "email", validateEmail],
+    ["--worker-name", "workerName", validateWorkerName], ["--relay-url", "relayUrl", normalizeRelayUrl],
+    ["--team-domain", "teamDomain", normalizeTeamDomain], ["--policy-aud", "policyAud", validatePolicyAud],
+  ]) {
+    if (opts[key] === undefined) continue;
+    try { opts[key] = validate(opts[key]); }
+    catch (err) { throw new UsageError(`${flag}: ${err.message}`); }
+  }
   return { command, opts };
 }
 

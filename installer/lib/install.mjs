@@ -11,7 +11,8 @@ import { ownsDeployment, resolveAccount } from "./account.mjs";
 import { describeMode, loadCommanderConfig, protectsCheckout, runSetup, updateCommanderConfig } from "./commander.mjs";
 import { axHelperPath, buildCommander, commanderBuildReason, installReason, npmCi } from "./deps.mjs";
 import { parseJsonc, setTopLevelString } from "./jsonc.mjs";
-import { recordInstallation } from "./install-metadata.mjs";
+import { installedPaths, recordInstallation, recordPreparation } from "./install-metadata.mjs";
+import { commanderModule, offboardingState, revokeLocalRuntime, stopJobs } from "./offboarding.mjs";
 import { lastAgentEvent } from "./doctor.mjs";
 import { KEY_FILES, fingerprint, inspectKeys, keyPresence } from "./keys.mjs";
 import { conflicts, createLaunchd, findOtherAgents } from "./launchd.mjs";
@@ -22,6 +23,7 @@ import { deployHash, pendingRuntime, readState, runtimeFingerprint, writeState }
 import { Checkpoint, InstallerError, expandHome, run, runInherit, runTee, shQuote, sleep } from "./util.mjs";
 import { normalizeRelayUrl, normalizeTeamDomain, validateDeviceId, validateEmail, validatePolicyAud, validateWorkerName } from "./validate.mjs";
 import { applyUpdates, interpret, readPersonalConfig, writePersonalConfig } from "./wrangler-config.mjs";
+import { agentFingerprint, betaInstallOptions, enrollBeta, probeBetaStatus, readInviteFile, recoverPendingBetaIdentity, takeInvite } from "./beta-enrollment.mjs";
 
 const TOTAL = 9;
 const DEFAULT_WORKER = "astra-bridge-relay";
@@ -57,17 +59,17 @@ function wranglerEnv(ctx, s) {
 
 // ---------------------------------------------------------------------------------------------
 
-async function preflight(ctx, opts, ui, s) {
+export async function preflight(ctx, opts, ui, s, { check = checkPrereqs } = {}) {
   ui.heading(`1/${TOTAL} Checking this Mac`);
   let rawCommander = null;
   try {
     rawCommander = JSON.parse(fs.readFileSync(ctx.remoteConfigFile, "utf8"));
   } catch {}
-  s.needGui = Boolean(opts.enableGui || (!opts.fileOnly && rawCommander?.trustedGui === true));
-  const checks = checkPrereqs(ctx, { needGui: s.needGui });
+  s.needGui = Boolean(opts.enableGui || (!opts.fileOnly && !opts.reconfigure && rawCommander?.trustedGui === true));
+  const checks = check(ctx, { needGui: s.needGui });
   printChecks(ui, checks);
   if (blockers(checks).length) {
-    throw new InstallerError("prerequisites are missing", { hint: "Fix the items marked ✗ above (nothing was installed or changed), then re-run ./install-macos.sh" });
+    throw new InstallerError("prerequisites are missing", { hint: "Fix the items marked ✗ above, then re-run ./install-macos.sh. A requested permission reduction is already applied locally, and the agent stays stopped until a run verifies its restart." });
   }
 }
 
@@ -130,7 +132,9 @@ async function workspace(ctx, opts, ui, s) {
   const wantGui = opts.enableGui ? true : opts.fileOnly ? false : undefined;
   let existing = await loadCommanderConfig(ctx);
 
-  if (!existing.exists || opts.reconfigure) {
+  const betaReduction = opts.betaEnroll && existing.exists && (existing.raw?.roots?.length !== 1
+    || existing.raw?.trustedTerminal !== false || existing.raw?.trustedGui !== false);
+  if (!existing.exists || opts.reconfigure || betaReduction) {
     const current = existing.raw?.roots?.[0];
     const chosen = opts.workspace ?? (ui.interactive
       ? await ui.ask("Workspace folder the AI may use (a dedicated, empty-ish folder)", { defaultValue: current ?? ctx.defaultWorkspace })
@@ -202,8 +206,8 @@ async function workspace(ctx, opts, ui, s) {
   ui.ok(`workspace: ${existing.cfg.roots.join(", ")}`);
   const risky = existing.cfg.trustedTerminal || existing.cfg.trustedGui;
   (risky ? ui.warn : ui.ok)(`configured mode: ${describeMode(existing.cfg)}`);
-  if (readState(ctx).runtime?.pending) ui.warn("Runtime changes are pending; the running agent may still have its previous permissions until restart is verified.");
-  if (!risky) ui.info("Terminal and GUI tools are off. Enable them later only if needed: ./install-macos.sh --enable-terminal / --enable-gui");
+  if (readState(ctx).runtime?.pending) ui.warn("Runtime changes are pending; active permissions are not verified until the agent restarts and readiness is checked.");
+  if (!risky && !opts.betaEnroll) ui.info("Terminal and GUI tools are off. Enable them later only if needed: ./install-macos.sh --enable-terminal / --enable-gui");
   if (existing.cfg.trustedGui) {
     ui.info("GUI tools need Accessibility permission: System Settings → Privacy & Security → Accessibility → allow");
     ui.info(`the Node binary the agent runs (macOS asks the first time a GUI tool is used).`);
@@ -263,14 +267,19 @@ async function personalConfig(ctx, opts, ui, s) {
     }
   }
 
-  let deviceId = opts.deviceId ? validateDeviceId(opts.deviceId) : v.deviceId;
+  const betaEnabled = cur.data?.vars?.BETA_REGISTRY_ENABLED === "true";
+  if (cur.problems.some(p => p.includes("reserved beta-"))) throw new InstallerError("personal device id uses the reserved beta- prefix while BETA_REGISTRY_ENABLED=true; resolve the namespace before installing");
+  let deviceId = opts.deviceId ? validateDeviceId(opts.deviceId, betaEnabled) : v.deviceId;
+  if (deviceId) validateDeviceId(deviceId, betaEnabled);
   if (created && !opts.deviceId && ui.interactive) {
     deviceId = await ui.ask("Device id for this Mac", { defaultValue: v.deviceId ?? "my-mac", validate: validateDeviceId });
   }
   deviceId ??= "my-mac";
+  // Also rewrites ids that differ or are not exact: the Worker compares them verbatim.
   if (deviceId !== v.deviceId || cur.problems.some((p) => p.includes("DEVICE_ID"))) {
     updates.deviceId = deviceId;
-    note("device id", v.deviceId, deviceId);
+    if (deviceId === v.deviceId) note("AGENT_DEVICE_ID, CLIENT_DEVICE_ID, MCP_DEVICE_ID", "(not all exactly the device id)", deviceId);
+    else note("device id", v.deviceId, deviceId);
   }
 
   const workerName = opts.workerName ? validateWorkerName(opts.workerName) : v.workerName ?? DEFAULT_WORKER;
@@ -280,21 +289,23 @@ async function personalConfig(ctx, opts, ui, s) {
   }
 
   let email = opts.email ? validateEmail(opts.email) : v.email;
-  if (!email) {
+  if (!email && !opts.skipCloudflare) {
     ui.info("Cloudflare Access will let exactly one identity in: yours. The Worker checks it a second time.");
     email = await ui.ask("Your email address (the one you log in to Cloudflare Access with)", { flag: "--email", validate: validateEmail });
   }
-  if (email !== v.email) {
+  if (email && email !== v.email) {
     updates.email = email;
     note("ACCESS_ALLOWED_EMAILS", v.email, email);
   }
+  if (!email && opts.skipCloudflare) ui.info("Cloudflare Access email skipped (--skip-cloudflare)");
 
-  if (opts.relayUrl) {
-    const url = normalizeRelayUrl(opts.relayUrl);
-    if (url !== v.relayUrl) {
-      updates.relayUrl = url;
-      note("relay URL", v.relayUrl, url);
-    }
+  const relayUrl = opts.relayUrl ? normalizeRelayUrl(opts.relayUrl) : v.relayUrl;
+  if (relayUrl && relayUrl !== v.relayUrl) {
+    updates.relayUrl = relayUrl;
+    note("relay URL", v.relayUrl, relayUrl);
+  } else if (relayUrl && cur.problems.some((p) => p.startsWith("OAUTH_"))) {
+    updates.relayUrl = relayUrl; // rewrites OAUTH_ISSUER and OAUTH_RESOURCE exactly
+    note("OAUTH_ISSUER, OAUTH_RESOURCE", "(not exact)", `${relayUrl}, ${relayUrl}/mcp`);
   }
   if (opts.teamDomain) {
     const t = normalizeTeamDomain(opts.teamDomain);
@@ -585,8 +596,8 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
     else throw new Checkpoint(`agent is not running (state ${now.state ?? "UNKNOWN"}, last exit ${now.lastExitCode ?? "?"}); runtime changes remain pending`);
   }
 
-  if (opts.noNetworkChecks || opts.skipCloudflare) return ui.warn("relay connection not checked (network checks skipped)");
-  const clientKey = path.join(ctx.astraHome, KEY_FILES.client);
+  if (opts.noNetworkChecks || (opts.skipCloudflare && !opts.betaEnroll)) return ui.warn("relay connection not checked (network checks skipped)");
+  const clientKey = path.join(ctx.astraHome, opts.betaEnroll ? KEY_FILES.agent : KEY_FILES.client);
   let status;
   for (let i = 0; i < 15; i++) {
     status = await probeStatus(relayUrl, deviceId, clientKey);
@@ -603,7 +614,7 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
     await wait(3000);
   }
   if (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status)) {
-    throw new InstallerError(`the relay rejected this Mac's signed request (${status.error}); check keys/device/config and re-run with --redeploy`);
+    throw new InstallerError(opts.betaEnroll ? "beta agent verification rejected; contact the operator" : `the relay rejected this Mac's signed request (${status.error}); check keys/device/config and re-run with --redeploy`);
   }
   if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP readiness is not verified; runtime changes remain pending", { instructions: ["Check ./install-macos.sh doctor and re-run when the agent can connect."] });
   const verified = launchd.status();
@@ -680,7 +691,7 @@ async function access(ctx, opts, ui, s) {
 }
 
 export async function verifyCompletion(ctx, s, { probeStatus = probeAgentStatus, makeLaunchd = createLaunchd } = {}) {
-  if (!s.accessVerified || !s.agentVerified) throw new Checkpoint("setup is not finished: agent/MCP readiness and Cloudflare Access edge protection must both be verified");
+  if ((!s.beta && !s.accessVerified) || !s.agentVerified) throw new Checkpoint("setup is not finished: agent/MCP readiness and Cloudflare Access edge protection must both be verified");
   const { readTemplate } = await import(pathToFileURL(ctx.installAgent).href);
   const label = readTemplate().label;
   const runtime = readState(ctx).runtime;
@@ -689,7 +700,7 @@ export async function verifyCompletion(ctx, s, { probeStatus = probeAgentStatus,
   if (st.loaded !== true || st.state !== "running" || st.pid !== runtime?.pid || runtime?.pending
     || runtimeFingerprint(ctx, plist) !== runtime?.applied) throw new Checkpoint("runtime changed after verification; re-run setup");
   // Access setup can redeploy the relay after the first health check. Recheck before exit 0.
-  const status = await probeStatus(s.relayUrl, s.personal.values.deviceId, path.join(ctx.astraHome, KEY_FILES.client));
+  const status = await probeStatus(s.relayUrl, s.personal.values.deviceId, path.join(ctx.astraHome, s.beta ? KEY_FILES.agent : KEY_FILES.client));
   if (status.failure === "configuration" || (status.status >= 400 && status.status < 500 && ![408, 429].includes(status.status))) throw new InstallerError("final agent/MCP verification was rejected; check keys, device and deployed config");
   if (!status.ok || !status.agentConnected || !status.mcpHealthy) throw new Checkpoint("agent/MCP became unavailable before completion; re-run to verify readiness");
 }
@@ -703,17 +714,90 @@ function finish(ctx, opts, ui, s) {
   ui.info("  3. Log in through Cloudflare Access and approve. In a chat, select the app and ask:");
   ui.info('     "List the files in my remote workspace".');
   ui.info("Health check at any time: ./install-macos.sh doctor");
-  ui.info("Stop the agent: ./install-macos.sh uninstall (keeps keys and config). To cut remote access at once,");
-  ui.info("also disable the Access application in the Cloudflare dashboard.");
+  ui.info("Stop locally: ./install-macos.sh uninstall (also stops tracked durable jobs; keeps keys and config).");
+  ui.info("For complete relay revocation, delete the Worker in Cloudflare or rotate both signing keys and redeploy.");
+  ui.info("Access protects /mcp only; disabling it does NOT revoke signed /v1/device RPC.");
+}
+
+/**
+ * Every run first retries a durable-job shutdown an earlier revocation or uninstall could not
+ * confirm (only for this installation's validated paths). A failure is reported, not hidden:
+ * setup continues, but never ends as complete while it stays unconfirmed.
+ */
+async function retryOffboarding(ctx, ui) {
+  if (offboardingState(ctx.commanderRemoteDir) !== "incomplete") return;
+  ui.warn("An earlier durable-job shutdown was not confirmed; retrying it first.");
+  try {
+    const { readTemplate } = await import(pathToFileURL(ctx.installAgent).href);
+    const installed = await installedPaths(ctx, path.join(ctx.launchAgentsDir, `${readTemplate().label}.plist`));
+    if (installed.commanderRemoteDir !== ctx.commanderRemoteDir) throw new InstallerError("installed paths differ from this setup; not signalling another setup's workers");
+    const r = await stopJobs(ctx);
+    ui.ok(`durable jobs verified stopped (${r?.cancelled ?? 0} queued cancelled, ${r?.stopped ?? 0} process(es) stopped)`);
+  } catch (err) {
+    ui.warn(`still unconfirmed: ${err.message}`);
+    if (err.hint) ui.info(err.hint);
+  }
+}
+
+function assertOffboardingConfirmed(ctx) {
+  if (offboardingState(ctx.commanderRemoteDir) !== "incomplete") return;
+  throw new Checkpoint("setup is otherwise verified, but an earlier durable-job shutdown is still UNCONFIRMED", {
+    instructions: [
+      "Processes a previous durable job started may still run. ./install-macos.sh doctor shows where;",
+      "resolve the listed worker/job, then re-run ./install-macos.sh (every run retries the verified shutdown first).",
+    ],
+  });
 }
 
 export async function install(ctx, opts, ui) {
-  ui.danger(SECURITY_BANNER);
+  let invite = takeInvite(ctx);
+  if (opts.inviteFile) {
+    if (!opts.betaEnroll || opts.legacyInvite || invite !== undefined) throw new InstallerError("use one invite source: --beta-enroll --invite-file");
+    const artifact = readInviteFile(opts.inviteFile, opts.relayUrl);
+    invite = artifact.invite;
+    opts = { ...opts, relayUrl: artifact.relayUrl };
+  } else if (invite !== undefined && !opts.legacyInvite) {
+    throw new InstallerError("ASTRA_BETA_INVITE is a legacy exposure risk; use --invite-file (compatibility requires --legacy-invite)");
+  }
+  if (opts.legacyInvite) ui.warn("Legacy invite input carries no origin; the release relay pin still applies. Environment secrets may be visible to same-user processes; prefer --invite-file.");
+  opts = betaInstallOptions(ctx, opts);
+  ui.danger(opts.betaEnroll ? ["Closed beta: the invited operator authorizes this device.", "File access is limited to your selected workspace. Terminal and GUI are disabled."] : SECURITY_BANNER);
   const s = {};
+  if (opts.fileOnly || opts.reconfigure) await revokeLocalRuntime(ctx, ui, opts);
+  else await retryOffboarding(ctx, ui);
   await preflight(ctx, opts, ui, s);
+  await recordPreparation(ctx);
   await dependencies(ctx, opts, ui, s);
+  // Refused before remote.json can change: a shutdown that is not confirmed keeps terminal off.
+  if (opts.enableTerminal && offboardingState(ctx.commanderRemoteDir) === "incomplete") {
+    throw new InstallerError("an earlier durable-job shutdown is UNCONFIRMED, so terminal tools were not enabled; nothing was changed", {
+      hint: "./install-macos.sh doctor shows what is unresolved. Resolve it, re-run ./install-macos.sh (it retries the shutdown), then --enable-terminal.",
+    });
+  }
   await workspace(ctx, opts, ui, s);
+  if (opts.enableTerminal) {
+    // Explicit opt-in only: allows new durable jobs again (cancelled jobs are never resurrected).
+    const { enableDurableJobs } = await commanderModule(ctx, "remote/offboarding.js");
+    try {
+      await enableDurableJobs(ctx.commanderRemoteDir);
+    } catch (err) {
+      throw new InstallerError(err.message);
+    }
+  }
   await keys(ctx, opts, ui, s);
+  if (opts.betaEnroll) {
+    opts = await recoverPendingBetaIdentity(ctx, opts, ui, s);
+    try { await enrollBeta(ctx, opts, ui, s, invite); }
+    finally { invite = undefined; }
+    await agent(ctx, opts, ui, s, { probeStatus: probeBetaStatus });
+    await verifyCompletion(ctx, s, { probeStatus: probeBetaStatus });
+    assertOffboardingConfirmed(ctx);
+    ui.heading("Beta device setup complete");
+    ui.ok("agent connected and local MCP healthy; file-only mode verified");
+    ui.info(`Confirm with the operator: device ${opts.deviceId}; agent SHA-256 ${agentFingerprint(s.keys.agent)}.`);
+    ui.info("The operator must bind the connector to this redeemed device and confirmed fingerprint. Re-run with --beta-enroll to verify or resume; remove the invite file after verification.");
+    return;
+  }
   await personalConfig(ctx, opts, ui, s);
   await cloudflareLogin(ctx, opts, ui, s);
   await deployStep(ctx, opts, ui, s);
@@ -725,5 +809,6 @@ export async function install(ctx, opts, ui) {
     });
   }
   await verifyCompletion(ctx, s);
+  assertOffboardingConfirmed(ctx);
   finish(ctx, opts, ui, s);
 }

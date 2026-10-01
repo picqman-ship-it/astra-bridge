@@ -1,9 +1,21 @@
 // Merge this opt-in snippet only after creating the D1 database manually.
-// Do not put this binding in wrangler.jsonc until the beta rollout gate is approved.
+// Keep wrangler.jsonc generic. Use a separate explicit deployment config after beta approval.
 {
   "vars": {
-    "BETA_REGISTRY_ENABLED": "true"
+    "BETA_REGISTRY_ENABLED": "true",
+    // Enable only during onboarding windows after applying ALL migrations.
+    "BETA_ENROLLMENT_ENABLED": "false"
   },
+  // Example namespace numbers: choose unused positive integers in your account.
+  // All six bindings are mandatory. Approximate limits per Cloudflare location.
+  "ratelimits": [
+    { "name": "BETA_ENROLL_RATE", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
+    { "name": "BETA_REQUEST_RATE", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } },
+    { "name": "BETA_MCP_RATE", "namespace_id": "1003", "simple": { "limit": 1200, "period": 60 } },
+    { "name": "BETA_ENROLL_GLOBAL_RATE", "namespace_id": "1004", "simple": { "limit": 60, "period": 60 } },
+    { "name": "BETA_AGENT_GLOBAL_RATE", "namespace_id": "1005", "simple": { "limit": 600, "period": 60 } },
+    { "name": "BETA_MCP_GLOBAL_RATE", "namespace_id": "1006", "simple": { "limit": 6000, "period": 60 } }
+  ],
   "d1_databases": [
     {
       "binding": "BETA_REGISTRY",

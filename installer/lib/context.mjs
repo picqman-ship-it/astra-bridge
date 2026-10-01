@@ -33,6 +33,7 @@ export function createContext({ env = process.env, repoDir = repoDirFromHere(), 
   // Children (npm, wrangler, keygen) must use this same Node: put its directory first on PATH.
   const childEnv = { ...env, PATH: [nodeDir, env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin"].join(":") };
   delete childEnv.NODE_ENV; // NODE_ENV=production would make `npm ci` skip the TypeScript compiler
+  delete childEnv.ASTRA_BETA_INVITE; // enrollment secret must never reach child processes
 
   return {
     env,

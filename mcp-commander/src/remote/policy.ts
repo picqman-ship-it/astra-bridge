@@ -5,6 +5,7 @@ import type { RemoteConfig } from './config.js';
 import { IDEMPOTENT_TOOLS, withIdempotency, type IdempotencyStore } from './idempotency.js';
 import type { JobService } from './job-service.js';
 import { jobTools } from './job-tools.js';
+import { RootGuard } from './root-guard.js';
 
 /**
  * Which tools a remote client gets, and the remote-only restrictions on them.
@@ -48,6 +49,11 @@ export function remoteToolNames(trustedTerminal: boolean, trustedGui = false): s
 export interface RemoteServices {
   idempotency: IdempotencyStore;
   jobs: JobService | null;
+  /**
+   * The runtime's one root snapshot, shared by every session. Required: a guard created per
+   * session would snapshot (and so authorize) a root that was replaced after the service started.
+   */
+  roots: RootGuard;
 }
 
 function remoteGetConfig(base: ToolDef, cfg: RemoteConfig, exposed: string[]): ToolDef {
@@ -115,6 +121,8 @@ function startProcessInRoot(base: ToolDef, cfg: RemoteConfig): ToolDef {
  */
 export function selectRemoteTools(cfg: RemoteConfig, services: RemoteServices) {
   const exposed = remoteToolNames(cfg.trustedTerminal, cfg.trustedGui);
+  const roots = services.roots;
+  if (!(roots instanceof RootGuard)) throw new Error('selectRemoteTools needs the runtime RootGuard (services.roots).');
   return (tools: ToolDef[]): ToolDef[] => {
     const selected = tools
       .filter((t) => exposed.includes(t.name) && !NEVER_REMOTE.includes(t.name))
@@ -126,7 +134,17 @@ export function selectRemoteTools(cfg: RemoteConfig, services: RemoteServices) {
       })
       .map((t) => (IDEMPOTENT_TOOLS.includes(t.name) ? withIdempotency(t, services.idempotency) : t));
     if (cfg.trustedTerminal && services.jobs) selected.push(...jobTools(services.jobs).filter((t) => exposed.includes(t.name)));
-    return selected;
+    return selected.map((tool) => ({
+      ...tool,
+      handler: async (args) => {
+        roots.assertStable();
+        if (tool.name === 'move_file') {
+          const move = args as { source: string; destination: string };
+          await roots.assertMove(move.source, move.destination);
+        }
+        return tool.handler(args);
+      },
+    }));
   };
 }
 

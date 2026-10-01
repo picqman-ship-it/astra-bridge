@@ -74,8 +74,10 @@ export function personalConfigProblem(file, st, uid = process.getuid?.()) {
 
 export function interpret(data) {
   const raw = Object.fromEntries(Object.entries(FIELDS).map(([k, p]) => [k, get(data, p)]));
-  const deviceIds = [raw.agentDeviceId, raw.clientDeviceId, raw.mcpDeviceId];
-  const deviceId = valid(validateDeviceId, raw.agentDeviceId);
+  const rawDeviceIds = [raw.agentDeviceId, raw.clientDeviceId, raw.mcpDeviceId];
+  const betaEnabled = data.vars?.BETA_REGISTRY_ENABLED === "true";
+  const deviceIds = rawDeviceIds.map((v) => valid(value => validateDeviceId(value, betaEnabled), v));
+  const deviceId = deviceIds[0];
   const relayUrl = valid(normalizeRelayUrl, raw.oauthIssuer);
   const values = {
     workerName: valid(validateWorkerName, raw.workerName),
@@ -88,16 +90,27 @@ export function interpret(data) {
     policyAud: valid(validatePolicyAud, raw.policyAud),
     email: valid((v) => {
       const list = String(v).split(",").map((s) => s.trim()).filter(Boolean);
-      if (list.length !== 1) throw new Error("one owner email");
-      return validateEmail(list[0]);
+      if (!list.length) throw new Error("at least one allowed email");
+      return list.map(validateEmail).join(",");
     }, raw.allowedEmails),
   };
+  // The Worker compares these values verbatim (relay/src/agent-auth.ts, index.ts, oauth.ts), so
+  // a value that is only equal after trimming or normalizing is still a problem. Setup rewrites
+  // them in canonical form (personalConfig in install.mjs).
   const problems = [];
+  if (betaEnabled && rawDeviceIds.some(id => typeof id === "string" && /^beta-/i.test(id))) {
+    problems.push("personal DEVICE_ID uses the reserved beta- prefix while BETA_REGISTRY_ENABLED=true");
+  }
   if (deviceId && deviceIds.some((d) => d !== deviceId)) {
     problems.push("AGENT_DEVICE_ID, CLIENT_DEVICE_ID and MCP_DEVICE_ID differ; they must be the same device id");
+  } else if (deviceId && rawDeviceIds.some((d) => d !== deviceId)) {
+    problems.push(`AGENT_DEVICE_ID, CLIENT_DEVICE_ID and MCP_DEVICE_ID must be exactly "${deviceId}" (the Worker compares them verbatim; remove surrounding whitespace)`);
+  }
+  if (relayUrl && raw.oauthIssuer !== relayUrl) {
+    problems.push(`OAUTH_ISSUER should be exactly ${relayUrl} (the Worker uses it verbatim)`);
   }
   if (relayUrl && raw.oauthResource !== `${relayUrl}/mcp`) {
-    problems.push(`OAUTH_RESOURCE should be ${relayUrl}/mcp`);
+    problems.push(`OAUTH_RESOURCE should be exactly ${relayUrl}/mcp`);
   }
   return { raw, values, problems, accessConfigured: Boolean(values.teamDomain && values.policyAud) };
 }
@@ -116,7 +129,7 @@ export function applyUpdates(text, updates) {
   if (updates.agentKey !== undefined) set(FIELDS.agentKey, validatePublicKeyB64(updates.agentKey));
   if (updates.clientKey !== undefined) set(FIELDS.clientKey, validatePublicKeyB64(updates.clientKey));
   if (updates.deviceId !== undefined) {
-    const id = validateDeviceId(updates.deviceId);
+    const id = validateDeviceId(updates.deviceId, parseJsonc(text).vars?.BETA_REGISTRY_ENABLED === "true");
     for (const p of [FIELDS.agentDeviceId, FIELDS.clientDeviceId, FIELDS.mcpDeviceId]) set(p, id);
   }
   if (updates.relayUrl !== undefined) {

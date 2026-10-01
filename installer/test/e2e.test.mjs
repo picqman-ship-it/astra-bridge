@@ -121,7 +121,8 @@ test("full guided install in a sandbox: file-only, keys, personal config, deploy
   assert.equal(JSON.parse(fs.readFileSync(path.join(sb.remoteDir, "remote.json"), "utf8")).trustedTerminal, true);
   assert.ok((sb.calls().match(/launchctl bootstrap/g) ?? []).length > bootstraps, "agent restarted");
   r = sb.run(["doctor", "--offline"]);
-  assert.match(r.out, /WARN  access mode: TERMINAL ON/);
+  assert.match(r.out, /FAIL  access mode: .*running authority is UNKNOWN/);
+  assert.match(r.out, /FAIL  runtime changes:/);
   r = sb.run([...BASE, "--yes", "--file-only"]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(sb.remoteDir, "remote.json"), "utf8")).trustedTerminal, false);
 
@@ -224,6 +225,25 @@ test("another agent for the same relay and device stops the install; one for ano
   assert.ok(fs.existsSync(sb.plist));
   r = sb.run(["doctor", "--offline"]);
   assert.match(r.out, /WARN  other agent: com\.someone\.astra-bridge-agent/);
+});
+
+test("legacy skip-cloudflare path does not require an email", { skip }, (t) => {
+  const sb = makeSandbox();
+  t.after(sb.cleanup);
+
+  const r = sb.run([
+    ...BASE, "--yes", "--skip-cloudflare",
+    "--relay-url", "https://astra-beta.example.workers.dev",
+    "--device-id", "test-mac",
+  ]);
+  assert.equal(r.status, 3, r.out);
+  assert.doesNotMatch(r.out, /Your email address|--email/);
+  assert.match(r.out, /Cloudflare Access email skipped/);
+
+  const personal = parseJsonc(fs.readFileSync(sb.personal, "utf8"));
+  assert.equal(personal.vars.MCP_DEVICE_ID, "test-mac");
+  assert.equal(personal.vars.OAUTH_ISSUER, "https://astra-beta.example.workers.dev");
+  assert.equal(personal.vars.ACCESS_ALLOWED_EMAILS, "you@example.com");
 });
 
 test("the personal config must be gitignored before personal values are written", { skip }, (t) => {

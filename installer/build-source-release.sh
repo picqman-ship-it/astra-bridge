@@ -30,7 +30,10 @@ name="astra-bridge-${version:-0}-$short"
 mkdir -p "$out"
 # git archive gives every entry the commit's time and a fixed owner, and gzip -n leaves out the
 # file name and time, so one commit always produces the same bytes (with the same git version).
-git -C "$root" archive --format=tar --prefix="$name/" "$commit" | gzip -n -9 > "$out/$name.tar.gz"
+# Explicit product paths keep internal review/task/result artifacts out of releases.
+git -C "$root" archive --format=tar --prefix="$name/" "$commit" \
+  install-macos.sh installer relay mcp-commander README.md SECURITY.md LICENSE THIRD-PARTY-NOTICES.md .gitignore \
+  | gzip -n -9 > "$out/$name.tar.gz"
 (cd "$out" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
 
 if [ "$rev" = HEAD ] && [ -n "$(git -C "$root" status --porcelain)" ]; then

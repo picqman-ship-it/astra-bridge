@@ -12,6 +12,7 @@ const select = await load('gui/select.js');
 const { GuiError, nativeRunner, HELPER_NAME } = await load('gui/helper.js');
 const { guiTools, GUI_TOOLS } = await load('tools/gui.js');
 const policy = await load('remote/policy.js');
+const { RootGuard } = await load('remote/root-guard.js');
 const { parseRemoteConfig } = await load('remote/config.js');
 
 // ---------------------------------------------------------------------------------------------
@@ -549,11 +550,13 @@ describe('gui tool schemas and remote policy', () => {
     try {
       const all = guiTools(ctx, { runner: fake().runner, platform: 'darwin' });
       const cfg = { trustedTerminal: false, trustedGui: true, roots: ['/tmp'], idempotency: { maxKeys: 10, maxResultBytes: 4096 } };
-      const selected = policy.selectRemoteTools(cfg, { idempotency: {}, jobs: null })(all);
+      const roots = new RootGuard(cfg.roots);
+      const selected = policy.selectRemoteTools(cfg, { idempotency: {}, jobs: null, roots })(all);
       assert.deepEqual(selected.map((t) => t.name), GUI_TOOLS);
       const keyed = selected.filter((t) => 'idempotencyKey' in t.inputSchema).map((t) => t.name);
       assert.deepEqual(keyed, ['press_element', 'set_element_value']);
-      const off = policy.selectRemoteTools({ ...cfg, trustedGui: false }, { idempotency: {}, jobs: null })(all);
+      assert.throws(() => policy.selectRemoteTools(cfg, { idempotency: {}, jobs: null }), /needs the runtime RootGuard/);
+      const off = policy.selectRemoteTools({ ...cfg, trustedGui: false }, { idempotency: {}, jobs: null, roots })(all);
       assert.deepEqual(off, []);
     } finally {
       cleanup();

@@ -9,6 +9,6 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+    "test": "node test/prepare.mjs && node --test --test-concurrency=1 test/*.test.mjs"
   }
 }

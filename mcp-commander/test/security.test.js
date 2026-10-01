@@ -10,8 +10,6 @@ const { validatePath, PathNotAllowedError, expandHome, isWithin, resolveReal } =
 const { checkCommand, runsInteractiveShell } = await load('security/commands.js');
 const { DEFAULT_BLOCKED_COMMANDS } = await load('config.js');
 
-const insensitive = process.platform === 'darwin' || process.platform === 'win32';
-
 /** root/allowed, root/allowed-evil, root/outside (+ files), all realpath'd. */
 function sandbox() {
   const root = tmpDir('mcpc-sec-');
@@ -244,17 +242,16 @@ test('validatePath: multiple allowed dirs, error lists all of them', async () =>
   }
 });
 
-test('validatePath: case handling is platform dependent', async () => {
+test('validatePath: case handling follows the volume, not the platform', async () => {
   const s = sandbox();
   try {
     const upper = path.join(s.root, 'ALLOWED', 'in.txt');
-    if (insensitive) {
+    if (fs.existsSync(upper)) {
       await validatePath(upper, [s.allowed]); // same directory on a case-insensitive FS
-      assert.equal(isWithin('/A/B/c', '/a/b'), true);
     } else {
       await denied(upper, [s.allowed]);
-      assert.equal(isWithin('/A/B/c', '/a/b'), false);
     }
+    assert.equal(isWithin('/A/B/c', '/a/b'), false, 'lexical containment never folds case');
   } finally {
     s.done();
   }

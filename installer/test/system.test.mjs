@@ -262,4 +262,5 @@ test("source release helper: the same commit gives byte-identical archives with 
   const list = spawnSync("/usr/bin/tar", ["-tzf", path.join(a, file)], { encoding: "utf8" }).stdout;
   assert.ok(list.includes("/relay/wrangler.jsonc"));
   assert.ok(!/node_modules|wrangler\.personal|\.pem$/m.test(list), "no dependencies, personal config or keys");
+  assert.doesNotMatch(list, /(?:REVIEW|TASK|RESULT)\.md/i, "no internal review/task/result artifacts");
 });
