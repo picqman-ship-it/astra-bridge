@@ -11,6 +11,7 @@ import {
 } from "../lib/account-pairing.mjs";
 import { assertTrustedBetaRelay } from "../lib/beta-trust.mjs";
 import { readState, writeState } from "../lib/state.mjs";
+import { parseArgs } from "../astra-macos.mjs";
 import { tmpDir } from "./helpers.mjs";
 
 const BASE = "https://astra-bridge-relay.example-sub.workers.dev";
@@ -39,6 +40,15 @@ function fixture(t) {
     opts: { accountPair: true, relayUrl: BASE, deviceId: DEVICE, fileOnly: true, skipCloudflare: true },
   };
 }
+
+test("CLI exposes account-pair as a separate generated-device enrollment mode", () => {
+  assert.equal(parseArgs(["--account-pair"]).opts.accountPair, true);
+  assert.throws(() => parseArgs(["--account-pair", "--beta-enroll"]), /separate enrollment modes/);
+  assert.throws(() => parseArgs(["--account-pair", "--invite-file", "/tmp/invite.json"]), /cannot use beta invite/);
+  assert.throws(() => parseArgs(["--account-pair", "--legacy-invite"]), /cannot use beta invite/);
+  assert.throws(() => parseArgs(["--account-pair", "--reset-pending-identity"]), /cannot use beta invite/);
+  assert.throws(() => parseArgs(["--account-pair", "--device-id", "chosen"]), /generated/);
+});
 
 test("account pairing options pin relay, force file-only and never allow owner/control setup", t => {
   const { ctx } = fixture(t);
