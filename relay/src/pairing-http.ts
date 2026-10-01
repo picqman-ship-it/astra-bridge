@@ -1,4 +1,4 @@
-import { BodyTooLargeError, readBoundedBody } from "./bounded-body";
+import { readBoundedBody } from "./bounded-body";
 import type { D1DatabaseLike } from "./beta-registry";
 import {
   PAIR_SECRET_PATTERN,
