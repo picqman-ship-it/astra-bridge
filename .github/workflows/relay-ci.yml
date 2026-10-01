@@ -30,12 +30,17 @@ jobs:
   installer:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: installer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm test
+      - name: Install mcp-commander dependencies
+        working-directory: mcp-commander
+        run: npm ci
+      - name: Install relay dependencies
+        working-directory: relay
+        run: npm ci
+      - name: Run installer tests
+        working-directory: installer
+        run: npm test
