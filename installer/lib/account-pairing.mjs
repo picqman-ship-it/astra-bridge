@@ -124,16 +124,16 @@ async function fetchPairStatus(relayUrl, token, deviceId, { fetchImpl = fetch } 
     });
     if (response.status !== 200) {
       await response.body?.cancel();
-      return { ok: false, status: response.status };
+      return { ok: false, httpStatus: response.status };
     }
     const body = await boundedJson(response);
     if (!exactKeys(body, ["status", "deviceId"]) || body.deviceId !== deviceId
       || !["pending", "claimed", "cancelled", "expired"].includes(body.status)) {
-      return { ok: false, status: 502 };
+      return { ok: false, httpStatus: 502 };
     }
-    return { ok: true, ...body };
+    return { ok: true, httpStatus: 200, pairStatus: body.status, deviceId: body.deviceId };
   } catch {
-    return { ok: false, status: 0 };
+    return { ok: false, httpStatus: 0 };
   }
 }
 
@@ -231,19 +231,19 @@ export async function pairAccount(
   }
 
   const deadline = Math.min(start.expiresAtMs, clock() + MAX_PAIR_WAIT_MS);
-  let lastStatus = 0;
+  let lastHttpStatus = 0;
   while (clock() < deadline) {
     const result = await fetchPairStatus(opts.relayUrl, start.pairingToken, opts.deviceId, { fetchImpl });
-    lastStatus = result.status ?? lastStatus;
-    if (result.ok && result.status === "claimed") {
+    lastHttpStatus = result.httpStatus ?? lastHttpStatus;
+    if (result.ok && result.pairStatus === "claimed") {
       writeState(ctx, { accountPairing: { ...record, registered: true } });
       ui.ok("Astra account paired with this Mac");
       return;
     }
-    if (result.ok && (result.status === "expired" || result.status === "cancelled")) {
+    if (result.ok && (result.pairStatus === "expired" || result.pairStatus === "cancelled")) {
       throw new InstallerError("account pairing expired or was cancelled; re-run to start a fresh request");
     }
-    if (!result.ok && lastStatus && ![408, 429, 500, 502, 503, 504].includes(lastStatus)) {
+    if (!result.ok && lastHttpStatus && ![408, 429, 500, 502, 503, 504].includes(lastHttpStatus)) {
       throw new InstallerError("account pairing status was rejected; re-run to recover safely");
     }
     await wait(2000);
