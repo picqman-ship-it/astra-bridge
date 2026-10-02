@@ -100,6 +100,8 @@ function accessEnv(overrides = {}) {
     OAUTH_OWNER_SECRET: "owner-secret-for-tests-" + "s".repeat(40),
     // Any OAuthStore use would mean the Worker's own OAuth tokens were consulted.
     OAUTH_STORE: { getByName: (name) => { storeCalls.push(name); throw new Error("OAuthStore must not be used"); } },
+    ...Object.fromEntries(["BETA_ENROLL_RATE", "BETA_REQUEST_RATE", "BETA_MCP_RATE",
+      "BETA_ENROLL_GLOBAL_RATE", "BETA_AGENT_GLOBAL_RATE", "BETA_MCP_GLOBAL_RATE"].map(name => [name, { limit: async () => ({ success: true }) }])),
     MCP_AUTH_MODE: "access",
     TEAM_DOMAIN: TEAM,
     POLICY_AUD: AUD,

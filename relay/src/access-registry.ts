@@ -1,5 +1,5 @@
 import { isBetaDeviceId } from "./beta-identity";
-import type { BetaPrincipal, D1DatabaseLike } from "./beta-registry";
+import { isOpaqueId, type BetaPrincipal, type D1DatabaseLike } from "./beta-registry";
 
 const MAX_ISSUER_LENGTH = 512;
 const MAX_SUBJECT_LENGTH = 512;
@@ -16,7 +16,7 @@ function validIdentityPart(value: string, max: number): boolean {
 
 function validRow(row: AccessDeviceRow | null): row is AccessDeviceRow {
   return row !== null
-    && typeof row.owner_id === "string" && row.owner_id.length > 0
+    && isOpaqueId(row.owner_id)
     && isBetaDeviceId(row.device_id)
     && (row.terminal_enabled === 0 || row.terminal_enabled === 1);
 }

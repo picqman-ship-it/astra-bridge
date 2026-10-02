@@ -1,0 +1,107 @@
+{
+  "checked_at_utc": "2026-10-02T14:37:24.965621+00:00",
+  "base_commit": "94f452080785cf9983ab3c75b91dd4376d9a8fd6",
+  "target_branch": "feature/chatgpt-mobile-plugin-beta2",
+  "runtime": {
+    "platform": "macOS Intel",
+    "node": "v24.15.0",
+    "npm": "11.12.1"
+  },
+  "baseline": {
+    "relay": {
+      "tests": 214,
+      "pass": 214,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "installer": {
+      "tests": 139,
+      "pass": 139,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  },
+  "regression_before": {
+    "relay": {
+      "tests": 15,
+      "pass": 2,
+      "fail": 13,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "installer": {
+      "tests": 8,
+      "pass": 0,
+      "fail": 8,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  },
+  "regression_after": {
+    "relay": {
+      "tests": 15,
+      "pass": 15,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "installer": {
+      "tests": 9,
+      "pass": 9,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  },
+  "full_after": {
+    "typecheck_exit": 0,
+    "relay": {
+      "tests": 230,
+      "pass": 230,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "installer": {
+      "tests": 148,
+      "pass": 148,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  },
+  "independent_runtime_evidence": "D1 account pairing race/rollback test executed in Miniflare; PASS. This is distinct from the Node SQLite fixtures, not a separate human/model review.",
+  "source_sha256": {
+    "installer/lib/account-pairing.mjs": "f5d081bce0013660c535701c15a5b8ab2dfa9c2a64411d2de8452f3ddc7a657e",
+    "installer/lib/uninstall.mjs": "93a37f2fa09f4316fc55d08d3d5ab3fee91944bd9a22a09e067c372a610b27ae",
+    "installer/test/account-pair-hardening.test.mjs": "025d673270c7652ed24101ec5c3ff84bbb990936d5acd28dc2cc42b9a3952e2e",
+    "installer/test/account-pairing.test.mjs": "286d133300ff6bc3abf1f3d17cd901c9043ad7c52ee7dcc0c082981e92a0ffa1",
+    "relay/migrations/0006_pairing_claim_marker.sql": "27d46edde1f955ac75dd9b1acf931fae12e50b0e2cc8a716af0bd0840c68c2c8",
+    "relay/src/access-registry.ts": "01d839baec4d3f12caf2a7a8e3dc1c128d07a5f61f362bb87a9a3846fe74485a",
+    "relay/src/index.ts": "aa0e77f8dee67eb43df74e3421eaee4c366662425a5f50c51d563a53f436c675",
+    "relay/src/pairing.ts": "e2646affb20a5623426af8ff845dd680d3fbee2b374327c84c61cb46b06705b9",
+    "relay/test/access.test.mjs": "34152749e80cf08e42dad88798ab49a84e72f7ea4c1aa6d9fee41de70086f1f4",
+    "relay/test/enrollment-d1.test.mjs": "c3b023011dfe207ac49ad03b495b2b37b8d5282b25a6144ef4892ce99a27b417",
+    "relay/test/enrollment-sqlite.mjs": "c16f7df25e9b4d6f43339ab1cfcc75a12b7e3aecc17a9c4e5fca71aeddb99a67",
+    "relay/test/mobile-hardening.test.mjs": "62d771b7cc207bbe8c91c2ccf3dddbbad744e369d89f0785f563eaef1a4b3291"
+  },
+  "log_sha256": {
+    "final-relay.log": "3bf0965687e4b430a588d59d18861675c5048a9abbd23a6b7e7e64e60f7d5cf0",
+    "final-installer.log": "8007adafa75dacc36bd1450ccb34e99fc1cc960fa0dbc2d1fc9f1f278e35fdf4",
+    "final-typecheck.log": "c0abee758d34713824a6d171ac998d444b1231703ca09a539de63d79143dabc3",
+    "regression-before-relay.log": "9d94fec35230e0b66a57c11cf481c9b991d20f2ba8c1dd734700024bf8e30b48",
+    "regression-before-installer.log": "bd365e05adec276367b969b09185ba459c64cc68e195c8926ef3296f3b89af97"
+  },
+  "live_deployment_changed": false,
+  "fresh_account_chatgpt_mobile_acceptance": "NOT_RUN",
+  "archive_gate_for_this_feature": "NOT_RUN",
+  "public_plugin_submission": "NOT_DONE",
+  "known_remaining_gates": [
+    "Browser claim URL still carries a short-lived pairing token; complete no-leak handoff/consent binding review before staging rollout.",
+    "Validate actual authenticated ChatGPT mobile plugin availability for a fresh account, with correct-device action and revocation evidence.",
+    "Terminal/GUI authority for account-paired devices is not implemented; pairing stays file-only.",
+    "No live D1 migration, Worker deploy, Access change, release or main merge is authorized by this checkpoint."
+  ]
+}

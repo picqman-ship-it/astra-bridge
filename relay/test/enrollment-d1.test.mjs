@@ -36,7 +36,7 @@ async function fixture(t) {
   } }] });
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql"]) {
     const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
     for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
   }
@@ -178,7 +178,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
   // Whole migration/operator artifacts go through D1 exec; no statement picking.
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql"]) {
     await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   await db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01');");
@@ -231,4 +231,35 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   assert.ok(results.includes(429), results.join(","));
   assert.equal((await status()).status, 403, "enroll exhaustion leaves agent class admitted");
   assert.equal((await mcp()).status, 401, "enroll exhaustion leaves MCP class admitted");
+});
+// Account pairing must preserve its transaction/rollback guarantees in real D1,
+// not just a SQL-pattern mock or Node SQLite.
+test("D1 account pairing: racing claimants, expiry and rollback preserve one owner", { timeout: 60000 }, async t => {
+  const { db, mf } = await fixture(t);
+  const { createPairingSession, claimPairingSession, pairingStatus, PAIR_TTL_MS } = await import("../.test-tmp/pairing.mjs");
+  const { signPairStart } = await import("../../installer/lib/account-pairing.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const registration = signPairStart(ORIGIN, randomUUID(), betaId("account-race"), publicKey, keys.privateKey);
+  const session = await createPairingSession(db, registration, now);
+  assert.ok(session);
+  const other = await mf.getD1Database("BETA_REGISTRY");
+  const alice = { issuer: "https://accounts.cloudflareaccess.com", subject: "alice", email: "alice@example.com" };
+  const bob = { ...alice, subject: "bob", email: "bob@example.com" };
+  const results = await Promise.all([[db, alice], [other, bob]].map(([connection, identity]) => claimPairingSession(connection, session.secret, identity, now + 1)));
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 1);
+  assert.equal((await db.prepare("SELECT count(*) n FROM user_identities").first()).n, 1);
+  assert.equal((await db.prepare("SELECT count(*) n FROM users").first()).n, 2, "fixture tester + exactly one successful claimant");
+  assert.equal((await pairingStatus(db, session.secret, now + PAIR_TTL_MS)).status, "expired");
+
+  const freshKey = generateKeyPairSync("ed25519");
+  const freshPub = freshKey.publicKey.export({ type: "spki", format: "der" }).toString("base64");
+  const next = await createPairingSession(db, signPairStart(ORIGIN, randomUUID(), betaId("account-rollback"), freshPub, freshKey.privateKey), now);
+  assert.ok(next);
+  await db.prepare("CREATE TRIGGER account_fail_insert BEFORE INSERT ON devices BEGIN SELECT RAISE(ABORT, 'injected'); END").run();
+  assert.equal(await claimPairingSession(db, next.secret, { ...alice, subject: "rollback", email: "rollback@example.com" }, now + 1), null);
+  assert.equal((await pairingStatus(db, next.secret, now + 2)).status, "pending");
+  assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 1);
+  assert.equal((await db.prepare("SELECT count(*) n FROM user_identities").first()).n, 1);
+  assert.equal((await db.prepare("SELECT count(*) n FROM users").first()).n, 2);
 });

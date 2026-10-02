@@ -26,7 +26,8 @@ Public at the Access edge, but independently authenticated/limited by the Worker
 - `/healthz` — harmless health probe
 - `/.well-known/openai-apps-challenge` — plugin ownership challenge
 - `/v1/device/*` — personal signed RPC, Ed25519 verified by Worker
-- `/beta/device/*` — registry-device signed status/connect/RPC
+- `/beta/device/*/status` — registry-device agent-signed status only; beta agent connection is `/v1/device/<beta-id>/connect`
+- `/beta/mcp` — separate legacy beta connector route, authenticated/limited by the Worker
 - `/beta/enroll` — invited enrollment; one-time invite + proof of key possession + rate limit
 - `/pair/start` — proof-of-key-possession + short-lived session + rate limit
 - `/pair/status` — short-lived pairing bearer only + rate limit
@@ -86,3 +87,7 @@ Do not modify the current beta.2 Access application or deploy these flags until:
 5. a real Mac completes pair → agent connect → ChatGPT MCP call → revoke.
 
 Only then consider promotion.
+
+## Latest verification and open gates
+
+See `../../docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md`. Account pairing additionally requires coherent Access/registry routing, migration 0006, and the existing rate bindings. No new feature has been deployed. Browser claim-token handling and real fresh-account ChatGPT mobile acceptance remain rollout gates.

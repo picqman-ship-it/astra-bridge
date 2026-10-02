@@ -80,12 +80,16 @@ export function accountPairInstallOptions(
     throw new InstallerError("a personal self-deploy installation exists; account pairing requires a separate installation");
   }
 
+  if (!saved && fs.lstatSync(path.join(ctx.launchAgentsDir, "com.example.astra-bridge-agent.plist"), { throwIfNoEntry: false })) {
+    throw new InstallerError("an existing agent is not identified as account-paired; refusing to replace it");
+  }
+
   const candidate = opts.relayUrl ?? saved?.relayUrl ?? pinnedOrigin;
   if (!candidate) throw new InstallerError("this release does not pin an Astra account relay");
   const relayUrl = normalizeRelayUrl(candidate);
   trust(relayUrl);
-  if (saved?.registered === true && saved.relayUrl !== relayUrl) {
-    throw new InstallerError("confirmed account pairing cannot change relay");
+  if (saved && saved.relayUrl !== relayUrl) {
+    throw new InstallerError("saved account pairing cannot change relay without verified recovery");
   }
   const deviceId = saved?.deviceId ?? `beta-${randomUUID()}`;
   if (!DEVICE.test(deviceId)) throw new InstallerError("invalid account-pairing device id");
@@ -102,15 +106,21 @@ function validateStartResponse(body, relayUrl, deviceId, now) {
 
   let claim;
   try { claim = new URL(body.claimUrl); } catch { return null; }
-  if (claim.origin !== relayUrl || claim.pathname !== "/pair/claim" || claim.hash
+  if (claim.origin !== relayUrl || claim.pathname !== "/pair/claim" || claim.hash || claim.username || claim.password
     || [...claim.searchParams.keys()].some((key) => key !== "token")
     || claim.searchParams.getAll("token").length !== 1
     || claim.searchParams.get("token") !== body.pairingToken) return null;
   return body;
 }
 
-async function defaultOpenBrowser(url) {
-  const result = run("/usr/bin/open", [url], { timeoutMs: 15_000 });
+export async function openPairingBrowser(url, { runImpl = run } = {}) {
+  // Hand the URL to macOS over stdin, not process arguments or an on-disk script.
+  // The URL still needs browser/edge-log protection during staging review.
+  const target = new URL(url);
+  if (target.protocol !== "https:" || target.username || target.password) return false;
+  const result = runImpl("/usr/bin/osascript", ["-"], {
+    input: `open location ${JSON.stringify(target.href)}\n`, timeoutMs: 15_000,
+  });
   return result.status === 0 && !result.error;
 }
 
@@ -144,7 +154,7 @@ export async function pairAccount(
   s,
   {
     fetchImpl = fetch,
-    openBrowser = defaultOpenBrowser,
+    openBrowser = openPairingBrowser,
     wait = sleep,
     clock = Date.now,
     probe = probeBetaStatus,
@@ -176,7 +186,6 @@ export async function pairAccount(
     agentPublicKeyB64: s.keys.agent,
     registered: false,
   };
-  writeState(ctx, { accountPairing: record });
   s.beta = true;
   s.accountPaired = true;
   s.relayUrl = opts.relayUrl;
@@ -189,11 +198,14 @@ export async function pairAccount(
       ui.ok("recovered completed account pairing by agent signature");
       return;
     }
-    if (recovered.status && ![403, 404, 408, 429, 503].includes(recovered.status)) {
+    if (![403, 404].includes(recovered.status)) {
       throw new InstallerError("pending account pairing could not be safely recovered; retry later");
     }
   }
 
+  // Persist public identity before the request, but never rewrite it following
+  // inconclusive recovery or replay an uncertain authorization.
+  writeState(ctx, { accountPairing: record });
   const requestId = randomUUID();
   const body = signPairStart(opts.relayUrl, requestId, opts.deviceId, s.keys.agent, privateKey);
   let response;
@@ -226,7 +238,9 @@ export async function pairAccount(
   if (!start) throw new InstallerError("account pairing relay returned an invalid response");
 
   ui.info("Opening the secure Astra pairing page in your browser. Sign in and confirm this Mac.");
-  if (!await openBrowser(start.claimUrl)) {
+  let opened = false;
+  try { opened = await openBrowser(start.claimUrl); } catch { /* Do not reflect a URL/token from launcher errors. */ }
+  if (!opened) {
     throw new InstallerError("the secure pairing page could not be opened; re-run account pairing");
   }
 
@@ -236,6 +250,10 @@ export async function pairAccount(
     const result = await fetchPairStatus(opts.relayUrl, start.pairingToken, opts.deviceId, { fetchImpl });
     lastHttpStatus = result.httpStatus ?? lastHttpStatus;
     if (result.ok && result.pairStatus === "claimed") {
+      const verified = await probe(opts.relayUrl, opts.deviceId, keyFile, { fetchImpl });
+      if (!verified.ok) {
+        throw new InstallerError("pairing claim is recorded but signed device verification is not confirmed; re-run to recover safely");
+      }
       writeState(ctx, { accountPairing: { ...record, registered: true } });
       ui.ok("Astra account paired with this Mac");
       return;

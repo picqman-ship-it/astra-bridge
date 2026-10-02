@@ -186,19 +186,27 @@ async function verifySignedRequest(
   }
 }
 
-async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
-  if (!isPersonalDeviceId(env.MCP_DEVICE_ID, env.BETA_REGISTRY_ENABLED === "true")) {
+async function handleMcpRoute(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  // Only an omitted setting keeps legacy routing. A typo or incompatible auth
+  // mode must never send a hosted user's command to the personal owner's Mac.
+  const routing = env.ACCESS_DEVICE_ROUTING === undefined ? "fixed"
+    : typeof env.ACCESS_DEVICE_ROUTING === "string" ? env.ACCESS_DEVICE_ROUTING.trim().toLowerCase() : null;
+  const mode = mcpAuthMode(env);
+  if ((routing !== "fixed" && routing !== "registry") || mode === null
+    || (routing === "registry" && mode !== "access")) {
+    return json({ error: "service_unavailable" }, 503);
+  }
+  const registryRouting = routing === "registry";
+  if (!registryRouting && !isPersonalDeviceId(env.MCP_DEVICE_ID, env.BETA_REGISTRY_ENABLED === "true")) {
     return json({ error: "personal_device_id_reserved" }, 503);
   }
-
-  // Authentication resolves the principal first. The MCP request cannot select a
-  // device: operator, OAuth, and Access auth resolve to MCP_DEVICE_ID. Beta principals
-  // are refused on this personal route; closed-beta routing is separate below.
-  const registryRouting = env.ACCESS_DEVICE_ROUTING?.trim().toLowerCase() === "registry";
-
+  const reserved = [env.AGENT_DEVICE_ID, env.CLIENT_DEVICE_ID, env.MCP_DEVICE_ID];
   const relay: McpRelay = async (payload, principal) => {
-    const dynamicAccess = registryRouting && principal.kind === "access";
-    if (principal.kind === "beta" || (!dynamicAccess && principal.deviceId !== env.MCP_DEVICE_ID)) {
+    if (registryRouting) {
+      if (principal.kind !== "access" || !isBetaDeviceId(principal.deviceId) || reserved.includes(principal.deviceId)) {
+        throw new RelayError("agent_unavailable");
+      }
+    } else if (principal.kind === "beta" || principal.deviceId !== env.MCP_DEVICE_ID) {
       throw new RelayError("agent_unavailable");
     }
     const stub = env.DEVICE_RELAY.getByName(principal.deviceId);
@@ -207,38 +215,34 @@ async function handleMcpRoute(request: Request, env: Env): Promise<Response> {
     return outcome.result;
   };
 
-  // Access mode fails closed on missing or malformed config and never falls back
-  // to the static bearer or the Worker's own OAuth tokens.
-  const mode = mcpAuthMode(env);
-  if (mode === null) return json({ error: "service_unavailable" }, 503);
   if (mode === "access") {
     const access = accessConfig(env);
     if (!access) return json({ error: "service_unavailable" }, 503);
-
     if (registryRouting) {
       if (env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
         return json({ error: "service_unavailable" }, 503);
       }
+      // Hosted /mcp must retain the same pre-D1 limits as /beta/mcp.
+      const limited = await betaRateGate(request, env, "mcp");
+      if (limited) return limited;
       return handleMcpRequest(request, env, relay, {
-        authenticate: (req) => authenticateAccessRequest(
-          req,
-          access,
-          undefined,
-          undefined,
-          (identity) => resolveAccessIdentityDevice(
-            env.BETA_REGISTRY!,
-            access.issuer,
-            identity.subject,
-          ),
-        ),
-      });
+        authenticate: (req) => authenticateAccessRequest(req, access, undefined, undefined, async (identity) => {
+          const principal = await resolveAccessIdentityDevice(env.BETA_REGISTRY!, access.issuer, identity.subject);
+          return principal && !reserved.includes(principal.deviceId) ? principal : null;
+        }),
+        auditTool: (principal, name, outcome, durationMs) => {
+          const pending = recordAuditEvent(env.BETA_REGISTRY!, {
+            eventId: crypto.randomUUID(), ownerId: principal.ownerId, deviceId: principal.deviceId,
+            toolName: name, outcome, durationMs, createdAt: new Date().toISOString(),
+          }).catch(() => { /* Best effort, metadata only; never log payloads or database errors. */ });
+          if (ctx) ctx.waitUntil(pending);
+        },
+      }).catch(() => json({ error: "service_unavailable" }, 503));
     }
-
     return handleMcpRequest(request, env, relay, {
       authenticate: (req) => authenticateAccessRequest(req, access, env.MCP_DEVICE_ID),
     });
   }
-
   const config = oauthConfig(env);
   return handleMcpRequest(request, env, relay, {
     resourceMetadataUrl: config?.resourceMetadataUrl,
@@ -345,15 +349,18 @@ export default {
       if (env.PAIRING_ENABLED !== "true" || env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
         return json({ error: "not_found" }, 404);
       }
+      if (mcpAuthMode(env) !== "access" || env.ACCESS_DEVICE_ROUTING?.trim().toLowerCase() !== "registry") {
+        return json({ error: "service_unavailable" }, 503);
+      }
       const limited = await betaRateGate(request, env, url.pathname === "/pair/status" ? "status" : "enroll");
       if (limited) return limited;
 
       if (url.pathname === "/pair/start") {
         if (!env.BETA_REGISTRY.batch) return json({ error: "service_unavailable" }, 503);
-        return handlePairStart(request, env.BETA_REGISTRY);
+        return handlePairStart(request, env.BETA_REGISTRY).catch(() => json({ error: "service_unavailable" }, 503));
       }
       if (url.pathname === "/pair/status") {
-        return handlePairStatus(request, env.BETA_REGISTRY);
+        return handlePairStatus(request, env.BETA_REGISTRY).catch(() => json({ error: "service_unavailable" }, 503));
       }
 
       if (!env.BETA_REGISTRY.batch) return json({ error: "service_unavailable" }, 503);
@@ -366,7 +373,7 @@ export default {
         issuer: access.issuer,
         subject: identity.subject,
         email: identity.email,
-      });
+      }).catch(() => json({ error: "service_unavailable" }, 503));
     }
 
     // Readiness only, authenticated by the enrolled agent key. No client key or MCP token.
@@ -411,7 +418,7 @@ export default {
     }
 
     if (url.pathname === "/mcp") {
-      return handleMcpRoute(request, env);
+      return handleMcpRoute(request, env, ctx);
     }
 
     if (url.pathname === "/beta/mcp") {

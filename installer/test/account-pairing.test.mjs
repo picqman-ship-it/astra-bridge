@@ -118,7 +118,7 @@ test("installer account-pairing opens only validated claim URL, polls in memory,
     openBrowser: async url => { opened = url; return true; },
     wait: async () => { now += 2000; },
     clock: () => now,
-    probe: async () => ({ ok: false, status: 403 }),
+    probe: async () => ({ ok: true, status: 200 }),
   });
 
   assert.equal(opened, BASE + "/pair/claim?token=" + TOKEN);

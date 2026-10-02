@@ -168,70 +168,76 @@ export async function claimPairingSession(
   const nowIso = new Date(now).toISOString();
   const displayName = identity.email.slice(0, 160);
 
+  // Each batch is atomic in D1. The fresh marker ties device creation to THIS
+  // successful claim, never a previous request or another still-pending session.
+  const claimId = crypto.randomUUID();
   try {
     const results = await registry.batch([
       registry.prepare(`
         INSERT OR IGNORE INTO users (user_id, display_name, status, created_at)
-        VALUES (?, ?, 'active', ?)
-      `).bind(ownerId, displayName, nowIso),
+        SELECT ?, ?, ? , ?
+        WHERE EXISTS (
+          SELECT 1 FROM pairing_sessions WHERE secret_hash = ? AND status = 'pending'
+            AND created_at_ms <= ? AND expires_at_ms > ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM user_identities WHERE issuer = ? AND subject = ?
+            AND (owner_id <> ? OR status <> 'active')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM devices WHERE owner_id = ? AND status = 'active' AND revoked_at IS NULL
+        )
+      `).bind(ownerId, displayName, 'active', nowIso, secretHash, now, now,
+        identity.issuer, identity.subject, ownerId, ownerId),
       registry.prepare(`
         INSERT OR IGNORE INTO user_identities
           (issuer, subject, owner_id, email, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'active', ?, ?)
-      `).bind(identity.issuer, identity.subject, ownerId, identity.email, nowIso, nowIso),
+        SELECT ?, ?, ?, ?, 'active', ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM pairing_sessions WHERE secret_hash = ? AND status = 'pending'
+            AND created_at_ms <= ? AND expires_at_ms > ?
+        )
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND status = 'active')
+        AND NOT EXISTS (
+          SELECT 1 FROM devices WHERE owner_id = ? AND status = 'active' AND revoked_at IS NULL
+        )
+      `).bind(identity.issuer, identity.subject, ownerId, identity.email, nowIso, nowIso,
+        secretHash, now, now, ownerId, ownerId),
+      registry.prepare(`
+        UPDATE pairing_sessions
+        SET status = 'claimed', claimed_at_ms = ?, claim_id = ?, owner_id = ?
+        WHERE secret_hash = ? AND status = 'pending'
+          AND created_at_ms <= ? AND expires_at_ms > ?
+          AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND status = 'active')
+          AND EXISTS (
+            SELECT 1 FROM user_identities WHERE issuer = ? AND subject = ?
+              AND owner_id = ? AND status = 'active'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM devices WHERE owner_id = ? AND status = 'active' AND revoked_at IS NULL
+          )
+        RETURNING device_id
+      `).bind(now, claimId, ownerId, secretHash, now, now, ownerId,
+        identity.issuer, identity.subject, ownerId, ownerId),
       registry.prepare(`
         INSERT INTO devices
           (device_id, owner_id, agent_public_key_b64, status, terminal_enabled, created_at)
-        SELECT p.device_id, ?, p.agent_public_key_b64, 'active', 0, ?
-        FROM pairing_sessions AS p
-        WHERE p.secret_hash = ?
-          AND p.status = 'pending'
-          AND p.expires_at_ms > ?
-          AND NOT EXISTS (
-            SELECT 1 FROM devices AS existing
-            WHERE existing.owner_id = ?
-              AND existing.status = 'active'
-              AND existing.revoked_at IS NULL
-          )
-          AND EXISTS (
-            SELECT 1 FROM users AS u
-            WHERE u.user_id = ? AND u.status = 'active'
-          )
-          AND EXISTS (
-            SELECT 1 FROM user_identities AS i
-            WHERE i.issuer = ? AND i.subject = ?
-              AND i.owner_id = ? AND i.status = 'active'
-          )
+        SELECT device_id, owner_id, agent_public_key_b64, 'active', 0, ?
+        FROM pairing_sessions
+        WHERE secret_hash = ? AND claim_id = ? AND status = 'claimed' AND owner_id = ?
         RETURNING device_id
-      `).bind(
-        ownerId, nowIso, secretHash, now, ownerId, ownerId,
-        identity.issuer, identity.subject, ownerId,
-      ),
-      registry.prepare(`
-        UPDATE pairing_sessions
-        SET status = 'claimed', claimed_at_ms = ?, owner_id = ?
-        WHERE secret_hash = ?
-          AND status = 'pending'
-          AND EXISTS (
-            SELECT 1 FROM devices AS d
-            WHERE d.device_id = pairing_sessions.device_id
-              AND d.owner_id = ?
-              AND d.agent_public_key_b64 = pairing_sessions.agent_public_key_b64
-              AND d.status = 'active'
-          )
-        RETURNING device_id
-      `).bind(now, ownerId, secretHash, ownerId),
+      `).bind(nowIso, secretHash, claimId, ownerId),
     ]);
-
-    const deviceRows = results[2]?.results as Array<{ device_id?: unknown }> | undefined;
-    const claimRows = results[3]?.results as Array<{ device_id?: unknown }> | undefined;
-    const deviceId = deviceRows?.length === 1 && typeof deviceRows[0]?.device_id === "string"
-      ? deviceRows[0].device_id
-      : null;
+    if (results.length !== 4 || !results.every(result => result.success === true)) return null;
+    const claimRows = results[2].results as Array<{ device_id?: unknown }> | undefined;
+    const deviceRows = results[3].results as Array<{ device_id?: unknown }> | undefined;
+    const deviceId = deviceRows?.length === 1 && isBetaDeviceId(deviceRows[0]?.device_id)
+      ? deviceRows[0].device_id : null;
     return deviceId && claimRows?.length === 1 && claimRows[0]?.device_id === deviceId
-      ? { ownerId, deviceId }
-      : null;
+      ? { ownerId, deviceId } : null;
   } catch {
+    // Insert/unique-key failure rolls back the WHOLE batch, including the claim.
+    // Response delivery can still fail after commit; recover using signed device status.
     return null;
   }
 }
@@ -271,6 +277,6 @@ export async function pairingStatus(
     LIMIT 1
   `).bind(secretHash).first<PairRow>();
   if (!row || !isBetaDeviceId(row.device_id)) return null;
-  if (row.status === "pending" && row.expires_at_ms <= now) return { status: "expired", deviceId: row.device_id };
+  if (row.expires_at_ms <= now) return { status: "expired", deviceId: row.device_id };
   return { status: row.status, deviceId: row.device_id };
 }

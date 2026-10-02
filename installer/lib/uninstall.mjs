@@ -65,7 +65,8 @@ export async function uninstall(ctx, { purge = false, dryRun = false } = {}, ui,
     }
   }
   const installedHome = installed?.astraHome ?? ctx.astraHome;
-  const beta = readState({ ...ctx, stateFile: path.join(installedHome, "install-state.json") }).betaEnrollment;
+  const identityState = readState({ ...ctx, stateFile: path.join(installedHome, "install-state.json") });
+  const beta = identityState.betaEnrollment ?? identityState.accountPairing;
   const remoteDir = installed?.commanderRemoteDir ?? ctx.commanderRemoteDir;
   if (fs.lstatSync(path.join(remoteDir, "durable"), { throwIfNoEntry: false })) {
     if (!installed) throw new InstallerError("no validated installation paths for durable jobs; refusing to signal another setup's workers");
