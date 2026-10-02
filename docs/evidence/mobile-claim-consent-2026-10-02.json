@@ -1,0 +1,238 @@
+{
+  "checked_at_utc": "2026-10-02T16:40:25Z",
+  "base_commit": "7291ab39463059b2f1a5c5b6c5be6ccb0d81c8a6",
+  "remote_branch_sha_before_commit": "7291ab39463059b2f1a5c5b6c5be6ccb0d81c8a6",
+  "canonical_repository": "picqman-ship-it/astra-bridge",
+  "target_branch": "feature/chatgpt-mobile-plugin-beta2",
+  "worktree": "/Users/eimosd/CommanderWorkspace/astra-mobile-beta2-fix-20261002",
+  "checkpoint_status": "LOCAL_MILESTONE_VERIFIED",
+  "source_milestone_complete": true,
+  "provenance": "Codex (gpt-6-astra) started this patch and stopped at its usage limit; its intermediate D1 failures were sandbox listen EPERM only. A Claude Opus 5.5 session outside that sandbox re-ran Codex's tree unchanged, audited it, fixed further findings test-first and produced every count below.",
+  "runtime": {
+    "os": "macOS 13.7.8 (Darwin x86_64)",
+    "node": "v24.15.0",
+    "npm": "11.12.1",
+    "typescript": "5.9.3",
+    "miniflare": "5.20260926.0-alpha",
+    "workerd_compatibility_date": "2026-09-27"
+  },
+  "design_implemented": [
+    "Browser URL is exactly /pair/claim (no query, fragment or path credential); legacy token URLs/POSTs rejected without reflection; installer accepts no other claim URL and prints only the credential-free URL.",
+    "Three separate random values, SHA-256 hashes only at rest: 256-bit polling token (installer memory, 10 min); 128-bit browser code (local macOS dialog over stdin with never-share warning, 5 min, one-time); 256-bit confirmation value bound to verified issuer+subject+email, session device/key and files-v1 scope (max 5 min).",
+    "Two same-origin, Access-verified POSTs: code review, then explicit file-access confirmation; caller device/owner/key fields, email-only identity, account switch, replay and widened scope rejected without rows.",
+    "Every claim-batch write rechecks reviewed identity/device/key/scope/expiry; explicit NOT EXISTS guards replace INSERT OR IGNORE so any constraint failure rolls back the whole claim.",
+    "No two live pending sessions per Mac identity or agent key; lost start response retry returns 409 until expiry; installer never rotates identity and records completion only after signed device verification.",
+    "pair/status reports cancelled when the bound identity, user or device is inactive; every /mcp request re-resolves identity -> active user -> exactly one active device.",
+    "Malformed MCP_AUTH_MODE / ACCESS_DEVICE_ROUTING (empty, non-string, unknown) -> 503 before registry access, never the personal Mac; unset MCP_AUTH_MODE keeps static mode.",
+    "Claim pages: no-store, no-referrer, nosniff, X-Frame-Options DENY, COOP same-origin, CSP default-src 'none' with form-action 'self', frame-ancestors 'none', base-uri 'none'; no script or external resource.",
+    "Migration 0007 additive with CHECKs: 64-hex credential hashes, consent_scope only files-v1, integer consent times."
+  ],
+  "audit_findings_fixed_this_session": [
+    {
+      "finding": "INSERT OR IGNORE swallowed CHECK failures and review accepted identities the registry cannot store",
+      "reproduced_before_fix": "failed claim left users=1 identities=0 devices=0 (red-orphan-repro.log)",
+      "fix": "validIdentity mirrors user_identities CHECKs by code points without control characters; explicit NOT EXISTS guards"
+    },
+    {
+      "finding": "no database-level file-only scope invariant",
+      "fix": "0007 CHECK consent_scope IS NULL OR 'files-v1'; hash and timestamp CHECKs"
+    },
+    {
+      "finding": "no framing/opener headers beyond CSP",
+      "fix": "X-Frame-Options DENY and Cross-Origin-Opener-Policy same-origin on all claim pages"
+    },
+    {
+      "finding": "whitespace/case in a pasted code produced an 'already used, wait ten minutes' message although the code was intact",
+      "fix": "trim+lowercase; malformed code rejected before registry access with a distinct message"
+    },
+    {
+      "finding": "pairing HTTP handlers never executed in workerd",
+      "fix": "whole-Worker workerd test: pair start -> Access review/consent -> status + signed probe -> agent websocket -> Access MCP to that Mac only -> revoke-device operator SQL -> MCP 401, status cancelled, probe 403; only outbound fetch is the Access JWKS"
+    },
+    {
+      "finding": "populated 0006 -> 0007 upgrade proven only in Node SQLite",
+      "fix": "real D1 upgrade test: existing rows identical, legacy sessions unusable as browser credentials, fresh pairing works"
+    },
+    {
+      "finding": "local code dialog lacked a never-share warning (device-code phishing)",
+      "fix": "dialog states the code must never be shared"
+    }
+  ],
+  "codex_fixes_retained_and_reverified": [
+    "no overlapping pending sessions after lost start response (SQLite + real D1 simultaneous starts)",
+    "consent rechecked inside every batch write (raced-batch tests)"
+  ],
+  "verification": {
+    "codex_tree_as_received": {
+      "typecheck_exit": 0,
+      "full_relay": {
+        "tests": 265,
+        "pass": 265,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "exit": 0,
+        "log": "baseline-relay.log"
+      },
+      "full_installer": {
+        "tests": 153,
+        "pass": 153,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "exit": 0,
+        "log": "baseline-installer.log"
+      }
+    },
+    "red_before_fix": {
+      "relay_consent_and_d1_files": {
+        "tests": 53,
+        "pass": 47,
+        "fail": 6,
+        "cancelled": 0,
+        "skipped": 0,
+        "new_failing_tests": 6,
+        "log": "red-relay.log"
+      },
+      "installer_url_print_temp_copy": {
+        "pass": 4,
+        "fail": 1,
+        "note": "run against a /tmp copy with only the new line reverted"
+      },
+      "installer_dialog_warning": {
+        "tests": 5,
+        "pass": 4,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "log": "red-installer-dialog.log"
+      }
+    },
+    "focused_after_fix": {
+      "relay": {
+        "tests": 98,
+        "pass": 98,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "log": "green-focused-relay.log"
+      },
+      "installer": {
+        "tests": 22,
+        "pass": 22,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "log": "green-focused-installer.log"
+      }
+    },
+    "mutation_checks_of_workerd_e2e": {
+      "terminal_enabled_claim": "caught",
+      "routing_ignores_revocation_both_checks": "caught",
+      "routing_drops_outer_revocation_predicate_only": "survived (equivalent: subquery requires exactly one active non-revoked device)"
+    },
+    "workerd_runtime_probe": "URLSearchParams.size, replaceAll and code-point iteration available at compatibility date 2026-09-27",
+    "final": {
+      "diff_check_exit": 0,
+      "untracked_trailing_whitespace": "none",
+      "typecheck_exit": 0,
+      "full_relay": {
+        "tests": 276,
+        "pass": 276,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "exit": 0,
+        "real_d1_and_workerd_tests_executed": 15,
+        "log": "final-relay.log"
+      },
+      "full_installer": {
+        "tests": 153,
+        "pass": 153,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "exit": 0,
+        "log": "final-installer.log"
+      },
+      "source_tree_unchanged_during_final_runs": true
+    }
+  },
+  "source_tree_sha256": "b51f2d816dba44f260a7c28e0ec0ea82a6c9dde78455ee75e9aef870c65e3c90",
+  "source_file_count": 211,
+  "source_tree_hash_algorithm": "SHA256 of Python json.dumps(path_to_sha256, sort_keys=True). Paths from git ls-files --cached --others --exclude-standard, deduplicated/sorted; prefixes relay/, installer/, mcp-commander/, .github/ and suffixes .ts .mjs .js .sql .json .jsonc .yml .swift .sh (same algorithm as the superseded draft).",
+  "changed_source_sha256": {
+    "installer/lib/account-pairing.mjs": "7247b66525e244f31157ac79c47fc42301fed6af0bb343c2e5c5723765828fea",
+    "installer/test/account-pair-hardening.test.mjs": "7c2e92b749f5d19bfe94f29034eea55844ea98f2e91b1ea7e49e0bbbecce8660",
+    "installer/test/account-pairing.test.mjs": "19e455288d370065b8955508a9a5d249cb0bf40b957670e0ac638f801660b309",
+    "installer/test/pair-code.test.mjs": "95a845dc29f79379b835948927d747e7c34865298d2029a634e09e8a49002e36",
+    "relay/migrations/0007_pairing_consent.sql": "017c1cf486cb819fb91a79f08835538b8a4ff4e7d746c0a6484a95ff1f098115",
+    "relay/src/access-auth.ts": "106329297c325e74a5440cfb6341fbe7163ae96f3b502782a5d883d8f466b9e2",
+    "relay/src/index.ts": "af5fac5e5d7b115df08e192373516f0e722d0397557513a1aaffe0dbb5245e08",
+    "relay/src/pairing-http.ts": "b46d80030b9cfafee86a171d47b0db0e9293f5b726b85f27c4a3fd1f70e30edc",
+    "relay/src/pairing.ts": "c4a1d656d505fba6257e755e474928ff407fc1cd754a08b55d6233ab3889c7f1",
+    "relay/test/access.test.mjs": "d227ab8f4ff756f30a73b20744f8768f5e0bbc7560b9426b57c5c476af6064a3",
+    "relay/test/enrollment-d1.test.mjs": "507411ea32c9e4ae1ba1c1526b8c3b87d26f0ce756a0a7d1a8fc4fef42c8aa66",
+    "relay/test/enrollment-sqlite.mjs": "d63f9006a8c3d90e883bdcbd896d22eadad4e7464f1e7dd5136d65bfa6b9e72d",
+    "relay/test/mobile-hardening.test.mjs": "c94adbe83a10e10ff5a6f715ce86cc2fe8179ea4bb662dcd1f2703a28f1c5c33",
+    "relay/test/pairing-consent.test.mjs": "582371aa6169994809f2d9daf798e0da99a7ddeb3bba77092f240503564b54b1",
+    "relay/test/pairing-http.test.mjs": "c6947a5bee09d21a579d32de9635c9841c67516d7efcae2fcd69994617d1c3cc",
+    "relay/test/pairing.test.mjs": "6d13161f3a267ad31a3954f3fb6d66209e67d64b32f100638f7e9493f7dcabd2"
+  },
+  "changed_docs_sha256_at_commit_preparation": {
+    "docs/CHATGPT-MOBILE-ACCEPTANCE-2026-10-02.md": "bfda791499f9dfa7fc7e7d190ed861365692897ca9f7ef8c7a28fb14a51ca33a",
+    "docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md": "bd23daa2949ca2ce79b344aacb21c7cc06b7ae22de38ac1f7304702be2125ffd",
+    "docs/CHATGPT-MOBILE-PLUGIN.md": "63e6d911e32a43f21b6aa007aff5398ec900c15d8730691765f2637cdf2f73d0",
+    "relay/docs/ACCOUNT-PAIRING-ACCESS.md": "76e4b0a267230d487c5abba15afd88e255071251dd614412a24b715c3c0e408a"
+  },
+  "migration_history": {
+    "0001_to_0006_identical_to_base_commit": true,
+    "0007_new_never_committed_before": true,
+    "note": "0005 was revised once on 2026-10-01 (d0f9683 -> 2061c6b) before 0006 existed; feature-branch history, untagged; per the prior checkpoint no migration has been applied outside disposable databases."
+  },
+  "local_logs_directory": "relay/.local-evidence/claude-session (gitignored *.log)",
+  "log_sha256": {
+    "baseline-installer.log": "3609fa732ac1f196ca4126b9d56aebb959ba8dc129a3f7dfa97b39651bcedec0",
+    "baseline-relay.log": "be314d31a229db7d444b595c636045a81b71fdc4924f6acc0a52025b0e8abf59",
+    "baseline-typecheck.log": "65be6106b07b6f936752abf107ab795a9ea4741043f7a41db6dff7377d5b0a54",
+    "final-diff-check.log": "7676199b5c1053b6eb1616a03e84e739a3cecc5c963d0aa16286f97407279566",
+    "final-installer.log": "bb2262a2e3cb121ee54d2fe891c268a7d5dc3f7b491c5f41c16a249268881cf6",
+    "final-relay.log": "2611ef0e8407a146a2c66420155c25e2d15d1b4d08a4dd7ebaafcb4f0aaeb019",
+    "final-tree-after.log": "a8711345e8aa68ba8e46f66e23bb4933380aaf4c30e50cfefbbc7c0c4d6dd8ba",
+    "final-tree-before.log": "a8711345e8aa68ba8e46f66e23bb4933380aaf4c30e50cfefbbc7c0c4d6dd8ba",
+    "final-typecheck.log": "65be6106b07b6f936752abf107ab795a9ea4741043f7a41db6dff7377d5b0a54",
+    "green-focused-installer.log": "7e9f765ff947d28aa925cfc53eed435d73a1f45a4feecde08638408bf493268e",
+    "green-focused-relay.log": "8bdab91dbc72963c4d514f0a033401dead48a95899aba7ed416cd7824df9c068",
+    "green-typecheck.log": "c0abee758d34713824a6d171ac998d444b1231703ca09a539de63d79143dabc3",
+    "prefinal-installer.log": "5f09ed7f35604dc2bbfc18590a6a00ecb1c3c39e68659ad5e150eb81ee7e2a2a",
+    "prefinal-relay.log": "87b863c9017e9e002466d9b46f9f967a26c871109cf81fefe73fe4b19c4040d7",
+    "prefinal-tree.log": "5de7e0501c363798a7be1afcc12a40e6f51b782740d900ba128e8af215688cb3",
+    "prefinal-typecheck.log": "65be6106b07b6f936752abf107ab795a9ea4741043f7a41db6dff7377d5b0a54",
+    "red-installer-dialog.log": "60eab6ac4f3e501e732a86c2ee47e96477a19edca43cb3df106fb1feaa27d638",
+    "red-orphan-repro.log": "5b20c81ee7ae83d953203995efcc7e365f1222b57c39f997d880991fa861a9b6",
+    "red-relay.log": "02a58ab623ce524fe1056e02ca65731c4b1d4284d69e374a1134b2740c818ec8"
+  },
+  "log_content_note": "Logs contain only synthetic test fixture values; no live credentials, accounts or deployments were used.",
+  "superseded": "Draft evidence from the Codex session (D1 blocked, 230/12) is replaced by this file; its logs under relay/.local-evidence/claim-consent/ remain local history.",
+  "live_deployment_changed": false,
+  "live_d1_migrations_applied": false,
+  "access_security_changed": false,
+  "accounts_created": false,
+  "published_release_changed": false,
+  "public_main_changed": false,
+  "plugin_submission": "NOT_DONE",
+  "fresh_account_chatgpt_mobile_acceptance": "NOT_RUN",
+  "voice_acceptance": "NOT_RUN",
+  "packaged_source_gate_for_this_source": "NOT_RUN",
+  "residual_risks": [
+    "Device-code phishing: whoever enters a shown code first (with an Access-admitted identity) binds that account to the Mac; the Mac cannot yet display which account claimed it; dialog cancel does not cancel the server session (no Mac-side cancel endpoint).",
+    "Strict one-time code/confirmation: double submit or a lost review response consumes the code; re-run after the 10-minute session.",
+    "Review page holds the account-bound confirmation value in a hidden field; useless to other identities, but no-store does not prove browser erasure.",
+    "Installer recovery confirms via signed device status, which does not reflect identity revocation (MCP still denies).",
+    "Example BETA_ENROLL_RATE (5/min per address) vs 3-4 enroll-class requests per pairing must be checked in staging.",
+    "Real Access login/expiry redirects, browser history/back/resubmission and deployed logging remain staging observations."
+  ],
+  "acceptance_plan": "docs/CHATGPT-MOBILE-ACCEPTANCE-2026-10-02.md",
+  "next_action": "Owner-gated only: isolated staging fresh-account acceptance (install -> account pairing -> normal ChatGPT mobile invocation -> correct Mac effect -> server-side revoke) after separate authorization naming staging Worker/D1/Access, accounts and Macs.",
+  "obsidian_update": "Performed after commit (needs the commit SHA); not part of the tested-source evidence."
+}

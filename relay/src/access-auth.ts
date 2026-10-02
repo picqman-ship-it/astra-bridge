@@ -41,8 +41,10 @@ export type AccessConfig = {
 
 /** Unset keeps the existing static-bearer deployment unchanged; unknown values return null. */
 export function mcpAuthMode(env: AccessEnv): McpAuthMode | null {
-  const mode = env.MCP_AUTH_MODE?.trim().toLowerCase();
-  if (!mode || mode === "static") return "static";
+  if (env.MCP_AUTH_MODE === undefined) return "static";
+  if (typeof env.MCP_AUTH_MODE !== "string") return null;
+  const mode = env.MCP_AUTH_MODE.trim().toLowerCase();
+  if (mode === "static") return "static";
   if (mode === "access") return "access";
   return null;
 }

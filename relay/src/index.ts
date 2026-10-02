@@ -349,7 +349,8 @@ export default {
       if (env.PAIRING_ENABLED !== "true" || env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
         return json({ error: "not_found" }, 404);
       }
-      if (mcpAuthMode(env) !== "access" || env.ACCESS_DEVICE_ROUTING?.trim().toLowerCase() !== "registry") {
+      if (mcpAuthMode(env) !== "access" || typeof env.ACCESS_DEVICE_ROUTING !== "string"
+        || env.ACCESS_DEVICE_ROUTING.trim().toLowerCase() !== "registry") {
         return json({ error: "service_unavailable" }, 503);
       }
       const limited = await betaRateGate(request, env, url.pathname === "/pair/status" ? "status" : "enroll");

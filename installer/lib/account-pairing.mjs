@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createPrivateKey, randomUUID, sign } from "node:crypto";
+import { createHash, createPrivateKey, randomUUID, sign } from "node:crypto";
 import { InstallerError, run, sleep } from "./util.mjs";
 import { normalizeRelayUrl } from "./validate.mjs";
 import { readState, writeState } from "./state.mjs";
@@ -10,6 +10,7 @@ import { probeBetaStatus } from "./beta-enrollment.mjs";
 
 const DEVICE = /^beta-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PAIR_TOKEN = /^ap1_[a-f0-9]{64}$/;
+const CLAIM_CODE = /^pc1_[a-f0-9]{32}$/;
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_RESPONSE = 4096;
 const MAX_PAIR_WAIT_MS = 10 * 60 * 1000;
@@ -97,29 +98,38 @@ export function accountPairInstallOptions(
 }
 
 function validateStartResponse(body, relayUrl, deviceId, now) {
-  if (!exactKeys(body, ["ok", "deviceId", "expiresAtMs", "claimUrl", "pairingToken"])
+  if (!exactKeys(body, ["ok", "deviceId", "expiresAtMs", "claimUrl", "claimCode", "pairingToken"])
     || body.ok !== true || body.deviceId !== deviceId
     || !PAIR_TOKEN.test(body.pairingToken)
+    || !CLAIM_CODE.test(body.claimCode)
     || !Number.isSafeInteger(body.expiresAtMs)
     || body.expiresAtMs <= now || body.expiresAtMs > now + MAX_PAIR_WAIT_MS + 60_000
     || typeof body.claimUrl !== "string") return null;
 
   let claim;
   try { claim = new URL(body.claimUrl); } catch { return null; }
-  if (claim.origin !== relayUrl || claim.pathname !== "/pair/claim" || claim.hash || claim.username || claim.password
-    || [...claim.searchParams.keys()].some((key) => key !== "token")
-    || claim.searchParams.getAll("token").length !== 1
-    || claim.searchParams.get("token") !== body.pairingToken) return null;
+  if (body.claimUrl !== `${relayUrl}/pair/claim` || claim.origin !== relayUrl) return null;
   return body;
 }
 
 export async function openPairingBrowser(url, { runImpl = run } = {}) {
-  // Hand the URL to macOS over stdin, not process arguments or an on-disk script.
-  // The URL still needs browser/edge-log protection during staging review.
+  // Only the credential-free setup URL can enter history, redirects or edge URLs.
   const target = new URL(url);
-  if (target.protocol !== "https:" || target.username || target.password) return false;
+  if (target.protocol !== "https:" || url !== `${target.origin}/pair/claim`) return false;
   const result = runImpl("/usr/bin/osascript", ["-"], {
     input: `open location ${JSON.stringify(target.href)}\n`, timeoutMs: 15_000,
+  });
+  return result.status === 0 && !result.error;
+}
+
+export async function showPairingCode(code, deviceId, fingerprint, { runImpl = run } = {}) {
+  if (!CLAIM_CODE.test(code) || !DEVICE.test(deviceId) || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
+  // The code is intentionally visible only in a local user dialog, never in
+  // argv, terminal logs, files, browser URLs or the automatic clipboard.
+  const message = `Copy the code below into the Astra pairing page within five minutes. Never share this code: whoever enters it can connect their account to this Mac. Only approve your own account and Mac. Compare these details before connecting:\n\nDevice: ${deviceId}\nSHA-256: ${fingerprint}\n\nFile access only within your allowed folders.`;
+  const result = runImpl("/usr/bin/osascript", ["-"], {
+    input: `display dialog ${JSON.stringify(message)} with title "Astra Mac pairing" default answer ${JSON.stringify(code)} buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel"\nreturn ""\n`,
+    timeoutMs: 5 * 60 * 1000,
   });
   return result.status === 0 && !result.error;
 }
@@ -155,6 +165,7 @@ export async function pairAccount(
   {
     fetchImpl = fetch,
     openBrowser = openPairingBrowser,
+    showCode = showPairingCode,
     wait = sleep,
     clock = Date.now,
     probe = probeBetaStatus,
@@ -225,7 +236,7 @@ export async function pairAccount(
     const messages = {
       403: "account pairing proof was rejected",
       404: "account pairing is not enabled on this relay",
-      409: "this Mac identity is already paired or has a conflicting request",
+      409: "this Mac identity has a pending request, an existing binding, or was revoked; keep this installation identity and retry after the ten-minute session expires (a revoked Mac needs operator recovery)",
       429: "account pairing is rate-limited; retry later",
       503: "account pairing service is temporarily unavailable; retry later",
     };
@@ -237,12 +248,19 @@ export async function pairAccount(
   catch { start = null; }
   if (!start) throw new InstallerError("account pairing relay returned an invalid response");
 
-  ui.info("Opening the secure Astra pairing page in your browser. Sign in and confirm this Mac.");
+  // The setup URL carries no credential; printing it lets the user switch browsers.
+  ui.info(`Opening ${start.claimUrl}. Sign in, enter the code from the local dialog, then review your account and Mac.`);
   let opened = false;
   try { opened = await openBrowser(start.claimUrl); } catch { /* Do not reflect a URL/token from launcher errors. */ }
   if (!opened) {
     throw new InstallerError("the secure pairing page could not be opened; re-run account pairing");
   }
+
+  const fingerprint = createHash("sha256").update(Buffer.from(s.keys.agent, "base64")).digest("hex");
+  ui.info(`Pairing device: ${opts.deviceId}; Mac key SHA-256: ${fingerprint}`);
+  let displayed = false;
+  try { displayed = await showCode(start.claimCode, opts.deviceId, fingerprint); } catch { /* Never reflect code-bearing errors. */ }
+  if (!displayed) throw new InstallerError("pairing code display failed or was cancelled; re-run account pairing");
 
   const deadline = Math.min(start.expiresAtMs, clock() + MAX_PAIR_WAIT_MS);
   let lastHttpStatus = 0;

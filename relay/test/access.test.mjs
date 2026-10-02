@@ -156,7 +156,7 @@ async function assertUnauthorized(response) {
 
 test("auth mode defaults to static and fails closed on unknown values", () => {
   assert.equal(mcpAuthMode({}), "static");
-  assert.equal(mcpAuthMode({ MCP_AUTH_MODE: "" }), "static");
+  assert.equal(mcpAuthMode({ MCP_AUTH_MODE: "" }), null);
   assert.equal(mcpAuthMode({ MCP_AUTH_MODE: "static" }), "static");
   assert.equal(mcpAuthMode({ MCP_AUTH_MODE: " Access " }), "access");
   assert.equal(mcpAuthMode({ MCP_AUTH_MODE: "acess" }), null);

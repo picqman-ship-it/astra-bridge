@@ -52,17 +52,15 @@ test("one-time pairing stores only the secret hash, claims one file-only Mac, an
   assert.notEqual(stored.secret_hash, session.secret);
   assert.equal(JSON.stringify(stored).includes(session.secret), false);
 
-  const preview = await pairingPreview(registry, session.secret, NOW + 1);
-  assert.equal(preview.deviceId, DEVICE);
-  assert.equal(preview.status, "pending");
-  assert.match(preview.fingerprint, /^[a-f0-9]{64}$/);
-
   const identity = {
     issuer: "https://team.cloudflareaccess.com",
     subject: "subject-01",
     email: "tester@example.com",
   };
-  const claimed = await claimPairingSession(registry, session.secret, identity, NOW + 2);
+  const preview = await pairingPreview(registry, session.claimCode, identity, NOW + 1);
+  assert.equal(preview.deviceId, DEVICE);
+  assert.match(preview.fingerprint, /^[a-f0-9]{64}$/);
+  const claimed = await claimPairingSession(registry, preview.consent, identity, NOW + 2);
   assert.ok(claimed);
   assert.equal(claimed.deviceId, DEVICE);
 
@@ -97,12 +95,14 @@ test("one identity cannot silently acquire a second active Mac", async () => {
 
   const first = await registration({ deviceId: "beta-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" });
   const firstSession = await createPairingSession(registry, await validatePairStart(first.body, ORIGIN), NOW);
-  assert.ok(await claimPairingSession(registry, firstSession.secret, identity, NOW + 1));
+  const firstConsent = await pairingPreview(registry, firstSession.claimCode, identity, NOW);
+  assert.ok(await claimPairingSession(registry, firstConsent.consent, identity, NOW + 1));
 
   const second = await registration({ deviceId: "beta-01234567-89ab-4cde-8f01-23456789abcd" });
   const secondSession = await createPairingSession(registry, await validatePairStart(second.body, ORIGIN), NOW + 2);
   assert.ok(secondSession);
-  assert.equal(await claimPairingSession(registry, secondSession.secret, identity, NOW + 3), null);
+  const secondConsent = await pairingPreview(registry, secondSession.claimCode, identity, NOW + 2);
+  assert.equal(await claimPairingSession(registry, secondConsent.consent, identity, NOW + 3), null);
   assert.equal((db.prepare("SELECT count(*) AS n FROM devices WHERE status = 'active'").get()).n, 1);
   assert.deepEqual(await pairingStatus(registry, secondSession.secret, NOW + 4), {
     status: "pending",
@@ -121,12 +121,14 @@ test("expired, invalid and replayed pairing material fails closed", async () => 
     status: "expired",
     deviceId: DEVICE,
   });
-  assert.equal(await pairingPreview(registry, session.secret, NOW + PAIR_TTL_MS), null);
-  assert.equal(await claimPairingSession(registry, session.secret, {
+  const identity = {
     issuer: "https://team.cloudflareaccess.com",
     subject: "subject-expired",
     email: "expired@example.com",
-  }, NOW + PAIR_TTL_MS), null);
+  };
+  assert.equal(await pairingPreview(registry, session.claimCode, identity, NOW + PAIR_TTL_MS), null);
+  const consent = await pairingPreview(registry, session.claimCode, identity, NOW);
+  assert.equal(await claimPairingSession(registry, consent.consent, identity, NOW + PAIR_TTL_MS), null);
 
   assert.equal(await createPairingSession(registry, body, NOW + 10), null, "same request id must not create a second session");
 

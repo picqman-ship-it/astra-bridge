@@ -7,7 +7,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { Miniflare } from "miniflare";
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { authorizeConnector, createInvite, revokeInvite } from "../scripts/beta-invite.mjs";
+import { authorizeConnector, createInvite, revokeDevice, revokeInvite } from "../scripts/beta-invite.mjs";
 import { betaId, ORIGIN, signEnrollment } from "./beta-test-helpers.mjs";
 import { signedHeaders } from "../../installer/lib/relay-probe.mjs";
 const { redeemEnrollmentInvite } = await import("../src/beta-enrollment.ts");
@@ -19,7 +19,12 @@ const registration = (invite, label) => signEnrollment(ORIGIN, invite, betaId(la
 // D1 exec accepts one statement per line. Retain EVERY statement from each whole
 // known migration/operator artifact, changing only comments/line formatting.
 const execArtifact = (db, sql) => db.exec(sql.replace(/--[^\n]*/g, "").replace(/\s*\n\s*/g, " ").replace(/;\s*/g, ";\n").trim());
-async function fixture(t) {
+const MIGRATIONS = ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql"];
+async function applyMigration(db, name) {
+  const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
+  for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
+}
+async function fixture(t, { migrations = MIGRATIONS } = {}) {
   const bundle = await build({ stdin: {
     contents: `import { validateRegistration } from './beta-enrollment.ts'; export default { async fetch(r) {
       return Response.json({ valid: !!await validateRegistration(await r.json(), '${ORIGIN}', '${"abi1_" + "a".repeat(64)}') });
@@ -36,10 +41,7 @@ async function fixture(t) {
   } }] });
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql"]) {
-    const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
-    for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
-  }
+  for (const name of migrations) await applyMigration(db, name);
   await db.prepare("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01')").run();
   const invite = createInvite({ ownerId: "tester", now }); await db.prepare(invite.sql).run();
   return { db, invite, mf };
@@ -178,7 +180,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
   // Whole migration/operator artifacts go through D1 exec; no statement picking.
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql"]) {
     await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   await db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01');");
@@ -236,7 +238,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
 // not just a SQL-pattern mock or Node SQLite.
 test("D1 account pairing: racing claimants, expiry and rollback preserve one owner", { timeout: 60000 }, async t => {
   const { db, mf } = await fixture(t);
-  const { createPairingSession, claimPairingSession, pairingStatus, PAIR_TTL_MS } = await import("../.test-tmp/pairing.mjs");
+  const { createPairingSession, claimPairingSession, pairingPreview, pairingStatus, PAIR_TTL_MS } = await import("../.test-tmp/pairing.mjs");
   const { signPairStart } = await import("../../installer/lib/account-pairing.mjs");
   const { randomUUID } = await import("node:crypto");
   const registration = signPairStart(ORIGIN, randomUUID(), betaId("account-race"), publicKey, keys.privateKey);
@@ -245,7 +247,14 @@ test("D1 account pairing: racing claimants, expiry and rollback preserve one own
   const other = await mf.getD1Database("BETA_REGISTRY");
   const alice = { issuer: "https://accounts.cloudflareaccess.com", subject: "alice", email: "alice@example.com" };
   const bob = { ...alice, subject: "bob", email: "bob@example.com" };
-  const results = await Promise.all([[db, alice], [other, bob]].map(([connection, identity]) => claimPairingSession(connection, session.secret, identity, now + 1)));
+  const reviews = await Promise.all([[db, alice], [other, bob]].map(([connection, identity]) => pairingPreview(connection, session.claimCode, identity, now)));
+  assert.equal(reviews.filter(Boolean).length, 1, 'code review is single-use across accounts');
+  const winner = reviews[0] ? alice : bob;
+  const loser = reviews[0] ? bob : alice;
+  const consent = reviews.find(Boolean).consent;
+  assert.equal(await claimPairingSession(db, consent, loser, now + 1), null, 'account switch cannot confirm');
+  assert.equal((await db.prepare('SELECT count(*) n FROM user_identities').first()).n, 0);
+  const results = await Promise.all([db, other].map(connection => claimPairingSession(connection, consent, winner, now + 1)));
   assert.equal(results.filter(Boolean).length, 1);
   assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 1);
   assert.equal((await db.prepare("SELECT count(*) n FROM user_identities").first()).n, 1);
@@ -256,10 +265,217 @@ test("D1 account pairing: racing claimants, expiry and rollback preserve one own
   const freshPub = freshKey.publicKey.export({ type: "spki", format: "der" }).toString("base64");
   const next = await createPairingSession(db, signPairStart(ORIGIN, randomUUID(), betaId("account-rollback"), freshPub, freshKey.privateKey), now);
   assert.ok(next);
+  const rollbackIdentity = { ...alice, subject: "rollback", email: "rollback@example.com" };
+  const rollbackConsent = await pairingPreview(db, next.claimCode, rollbackIdentity, now);
   await db.prepare("CREATE TRIGGER account_fail_insert BEFORE INSERT ON devices BEGIN SELECT RAISE(ABORT, 'injected'); END").run();
-  assert.equal(await claimPairingSession(db, next.secret, { ...alice, subject: "rollback", email: "rollback@example.com" }, now + 1), null);
+  assert.equal(await claimPairingSession(db, rollbackConsent.consent, rollbackIdentity, now + 1), null);
   assert.equal((await pairingStatus(db, next.secret, now + 2)).status, "pending");
   assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 1);
   assert.equal((await db.prepare("SELECT count(*) n FROM user_identities").first()).n, 1);
   assert.equal((await db.prepare("SELECT count(*) n FROM users").first()).n, 2);
+  await db.prepare('DROP TRIGGER account_fail_insert').run();
+  assert.ok(await claimPairingSession(db, rollbackConsent.consent, rollbackIdentity, now + 3), 'rollback leaves consent usable');
+  assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 2);
+});
+
+test('D1 simultaneous starts cannot create overlapping sessions for the same Mac', async t => {
+  const { db, mf } = await fixture(t);
+  const { createPairingSession, PAIR_TTL_MS } = await import('../.test-tmp/pairing.mjs');
+  const { signPairStart } = await import('../../installer/lib/account-pairing.mjs');
+  const { randomUUID } = await import('node:crypto');
+  const other = await mf.getD1Database('BETA_REGISTRY');
+  const start = device => signPairStart(ORIGIN, randomUUID(), device, publicKey, keys.privateKey);
+  const results = await Promise.all([db, other].map(connection =>
+    createPairingSession(connection, start(betaId('start-race')), now)));
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(await createPairingSession(other, start(betaId('same-key-new-id')), now + 1), null);
+  assert.equal((await db.prepare('SELECT count(*) n FROM pairing_sessions').first()).n, 1);
+  assert.ok(await createPairingSession(other, start(betaId('start-race')), now + PAIR_TTL_MS));
+});
+
+// Migration 0007 must upgrade a POPULATED 0006 registry in the real D1 runtime:
+// accounts/devices/identities/invites/sessions stay identical, legacy pending
+// sessions never become browser credentials, and new pairings work afterwards.
+test("D1 migration 0007 upgrades a populated 0006 registry without rewriting accounts", { timeout: 60000 }, async t => {
+  const { db } = await fixture(t, { migrations: MIGRATIONS.slice(0, 6) });
+  const { createPairingSession, claimPairingSession, pairingPreview, pairingStatus, PAIR_TTL_MS } = await import("../.test-tmp/pairing.mjs");
+  const { signPairStart } = await import("../../installer/lib/account-pairing.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const sha256 = value => createHash("sha256").update(value).digest("hex");
+  const issuer = "https://accounts.cloudflareaccess.com";
+  const legacyDevice = betaId("legacy-device");
+  await db.prepare("INSERT INTO devices VALUES (?, 'tester', ?, 'active', 0, '2026-01-01', NULL)").bind(legacyDevice, publicKey).run();
+  await db.prepare("INSERT INTO user_identities (issuer, subject, owner_id, email, status, created_at) VALUES (?, 'tester-subject', 'tester', 'tester@example.com', 'active', '2026-01-01')").bind(issuer).run();
+  const pendingKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64");
+  const legacyToken = "ap1_" + "d".repeat(64);
+  await db.prepare("INSERT INTO pairing_sessions (secret_hash, request_id, device_id, agent_public_key_b64, status, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, 'pending', ?, ?)")
+    .bind(sha256(legacyToken), randomUUID(), betaId("legacy-pending"), pendingKey, now, now + PAIR_TTL_MS).run();
+  await db.prepare("INSERT INTO pairing_sessions (secret_hash, request_id, device_id, agent_public_key_b64, status, created_at_ms, expires_at_ms, claimed_at_ms, owner_id, claim_id) VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, 'tester', ?)")
+    .bind(sha256("ap1_" + "c".repeat(64)), randomUUID(), legacyDevice, publicKey, now - 1000, now + PAIR_TTL_MS, now - 500, randomUUID()).run();
+  const legacyColumns = "secret_hash, request_id, device_id, agent_public_key_b64, status, created_at_ms, expires_at_ms, claimed_at_ms, owner_id, claim_id";
+  const snapshot = async () => Object.fromEntries(await Promise.all([
+    ["users", "SELECT * FROM users ORDER BY user_id"],
+    ["devices", "SELECT * FROM devices ORDER BY device_id"],
+    ["identities", "SELECT * FROM user_identities ORDER BY issuer, subject"],
+    ["invites", "SELECT * FROM enrollment_invites ORDER BY invite_hash"],
+    ["sessions", `SELECT ${legacyColumns} FROM pairing_sessions ORDER BY secret_hash`],
+  ].map(async ([name, sql]) => [name, (await db.prepare(sql).all()).results])));
+  const before = await snapshot();
+  assert.equal(before.sessions.length, 2);
+  await applyMigration(db, "0007_pairing_consent.sql");
+  assert.deepEqual(await snapshot(), before, "0007 changes no existing row");
+  assert.deepEqual((await db.prepare("SELECT DISTINCT claim_code_hash, consent_hash, consent_scope FROM pairing_sessions").all()).results,
+    [{ claim_code_hash: null, consent_hash: null, consent_scope: null }]);
+  const alice = { issuer, subject: "alice", email: "alice@example.com" };
+  assert.equal(await pairingPreview(db, legacyToken, alice, now), null, "legacy poll secret is not a browser code");
+  assert.equal((await pairingStatus(db, legacyToken, now)).status, "pending", "legacy installer still sees its own session");
+  assert.equal((await resolveAccessIdentityDevice(db, issuer, "tester-subject")).deviceId, legacyDevice);
+  const fresh = generateKeyPairSync("ed25519");
+  const freshPub = fresh.publicKey.export({ type: "spki", format: "der" }).toString("base64");
+  const session = await createPairingSession(db, signPairStart(ORIGIN, randomUUID(), betaId("post-upgrade"), freshPub, fresh.privateKey), now);
+  assert.ok(session, "fresh pairing starts on the upgraded registry");
+  const review = await pairingPreview(db, session.claimCode, alice, now);
+  assert.ok(await claimPairingSession(db, review.consent, alice, now + 1));
+  assert.equal((await resolveAccessIdentityDevice(db, issuer, "alice")).deviceId, betaId("post-upgrade"));
+});
+
+test("D1 pairing: failed identity insert rolls back the account row; non-file scope cannot be stored", { timeout: 60000 }, async t => {
+  const { db } = await fixture(t);
+  const { createPairingSession, claimPairingSession, pairingPreview } = await import("../.test-tmp/pairing.mjs");
+  const { signPairStart } = await import("../../installer/lib/account-pairing.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const carol = { issuer: "https://accounts.cloudflareaccess.com", subject: "carol", email: "carol@example.com" };
+  const session = await createPairingSession(db, signPairStart(ORIGIN, randomUUID(), betaId("identity-rollback"), publicKey, keys.privateKey), now);
+  const { consent } = await pairingPreview(db, session.claimCode, carol, now);
+  await db.prepare("CREATE TRIGGER identity_fail BEFORE INSERT ON user_identities BEGIN SELECT RAISE(ABORT, 'injected'); END").run();
+  assert.equal(await claimPairingSession(db, consent, carol, now + 1), null);
+  assert.equal((await db.prepare("SELECT count(*) n FROM users").first()).n, 1, "only the fixture tester remains");
+  assert.equal((await db.prepare("SELECT count(*) n FROM devices").first()).n, 0);
+  await db.prepare("DROP TRIGGER identity_fail").run();
+  for (const change of ["consent_scope = 'terminal'", "consent_hash = 'not-a-hash'"]) {
+    await assert.rejects(db.prepare(`UPDATE pairing_sessions SET ${change}`).run(), /CHECK constraint failed/, change);
+  }
+  assert.ok(await claimPairingSession(db, consent, carol, now + 2), "rollback leaves the reviewed confirmation usable");
+  assert.equal((await db.prepare("SELECT terminal_enabled FROM devices").first()).terminal_enabled, 0);
+});
+
+// The whole hosted path in workerd, short of real Access/ChatGPT: Mac proof ->
+// Access-authenticated code review -> explicit file-only consent -> Mac-side
+// status + signed probe -> agent connect -> Access-authenticated MCP routed to
+// THIS Mac only -> operator revoke artifact -> every surface fails closed.
+test("bundled Worker in workerd: account pairing consent routes Access MCP to the paired Mac; revoke denies", { timeout: 90000 }, async t => {
+  const { SignJWT, generateKeyPair, exportJWK } = await import("jose");
+  const { signPairStart } = await import("../../installer/lib/account-pairing.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const team = "https://pairing-e2e.cloudflareaccess.com";
+  const aud = "b".repeat(64);
+  const access = await generateKeyPair("RS256");
+  const jwk = { ...await exportJWK(access.publicKey), kid: "pairing-e2e", alg: "RS256", use: "sig" };
+  const assertion = (subject, email = "alice@example.com") => new SignJWT({ email })
+    .setProtectedHeader({ alg: "RS256", kid: "pairing-e2e" }).setIssuer(team).setAudience(aud)
+    .setSubject(subject).setIssuedAt().setExpirationTime("10m").sign(access.privateKey);
+  const outbound = [];
+  const bundle = await build({ stdin: {
+    contents: `export { default, DeviceRelay } from './index.ts';`,
+    resolveDir: fileURLToPath(new URL("../src", import.meta.url)), loader: "ts",
+  },
+    bundle: true, write: false, format: "esm", platform: "browser", external: ["cloudflare:*", "node:*"], logLevel: "silent" });
+  const example = JSON.parse(fs.readFileSync(new URL("../wrangler.beta.example.jsonc", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, ""));
+  const env = {
+    BETA_REGISTRY: { type: "d1", id: "pairing-e2e" },
+    DEVICE_RELAY: { type: "durable-object", worker: "pairing-e2e", exportName: "DeviceRelay" },
+    ...Object.fromEntries(Object.entries({ BETA_REGISTRY_ENABLED: "true", PAIRING_ENABLED: "true", MCP_AUTH_MODE: "access",
+      ACCESS_DEVICE_ROUTING: "registry", TEAM_DOMAIN: team, POLICY_AUD: aud,
+      AGENT_DEVICE_ID: "personal", CLIENT_DEVICE_ID: "personal", MCP_DEVICE_ID: "personal" }).map(([name, value]) => [name, { type: "text", value }])),
+    ...Object.fromEntries(example.ratelimits.map(binding => [binding.name, { type: "rate-limit", namespace: binding.namespace_id, simple: binding.simple }])),
+  };
+  const mf = new Miniflare({ workers: [{
+    config: {
+      name: "pairing-e2e", compatibilityDate: "2026-09-27", compatibilityFlags: ["nodejs_compat"],
+      manifest: { mainModule: "index.js", modules: { "index.js": { type: "esm", contents: bundle.outputFiles[0].text } } },
+      exports: { DeviceRelay: { type: "durable-object", storage: "sqlite" } }, env,
+    },
+    // The only permitted egress is the Access JWKS; anything else is recorded and refused.
+    dev: { outboundService: { type: "fetcher", handler: request => {
+      outbound.push(request.url);
+      return request.url === `${team}/cdn-cgi/access/certs` ? Response.json({ keys: [jwk] }) : new Response(null, { status: 502 });
+    } } },
+  }] });
+  t.after(() => mf.dispose());
+  const db = await mf.getD1Database("BETA_REGISTRY");
+  for (const name of MIGRATIONS) await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+  const deviceId = betaId("pairing-e2e");
+  const mac = { "cf-connecting-ip": "203.0.113.10" };
+  const browser = { "cf-connecting-ip": "198.51.100.20" };
+  const send = (target, from, init = {}) => mf.dispatchFetch(ORIGIN + target, { ...init, headers: { ...from, ...init.headers } });
+
+  const started = await send("/pair/start", mac, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(signPairStart(ORIGIN, randomUUID(), deviceId, publicKey, keys.privateKey)) });
+  assert.equal(started.status, 201);
+  const start = await started.json();
+  assert.equal(start.claimUrl, ORIGIN + "/pair/claim");
+
+  assert.equal((await send("/pair/claim", browser)).status, 401, "no verified Access assertion, no review");
+  const alice = await assertion("alice-subject");
+  const authed = { ...browser, "cf-access-jwt-assertion": alice };
+  const entry = await send("/pair/claim", authed);
+  assert.equal(entry.status, 200);
+  for (const [name, value] of [["x-frame-options", "DENY"], ["cross-origin-opener-policy", "same-origin"], ["cache-control", "no-store"], ["referrer-policy", "no-referrer"]]) {
+    assert.equal(entry.headers.get(name), value, name);
+  }
+  assert.ok(!(await entry.text()).includes(deviceId), "code entry page discloses no device");
+  const form = { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" };
+  const review = await send("/pair/claim", authed, { method: "POST", headers: form, body: new URLSearchParams({ code: start.claimCode }).toString() });
+  assert.equal(review.status, 200);
+  const reviewHtml = await review.text();
+  assert.ok(reviewHtml.includes(deviceId));
+  assert.ok(reviewHtml.includes(createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("hex")));
+  assert.ok(!reviewHtml.includes(start.claimCode) && !reviewHtml.includes(start.pairingToken));
+  const consent = reviewHtml.match(/name="consent" value="(ac1_[a-f0-9]{64})"/)[1];
+  const confirmed = await send("/pair/claim", authed, { method: "POST", headers: form, body: new URLSearchParams({ consent, scope: "files-v1" }).toString() });
+  assert.equal(confirmed.status, 200);
+  const device = await db.prepare("SELECT owner_id, terminal_enabled, status FROM devices WHERE device_id = ?").bind(deviceId).first();
+  assert.equal(device.terminal_enabled, 0); assert.equal(device.status, "active");
+
+  const pairStatus = () => send("/pair/status", mac, { headers: { authorization: `Bearer ${start.pairingToken}` } });
+  assert.deepEqual(await (await pairStatus()).json(), { status: "claimed", deviceId });
+  const statusPath = `/beta/device/${deviceId}/status`;
+  const signedStatus = () => send(statusPath, mac, { headers: signedHeaders(keys.privateKey, "GET", statusPath) });
+  assert.equal((await signedStatus()).status, 200, "installer recovery probe verifies the paired device");
+
+  const connectPath = `/v1/device/${deviceId}/connect`;
+  const connected = await send(connectPath, mac, { headers: { ...signedHeaders(keys.privateKey, "GET", connectPath), upgrade: "websocket" } });
+  assert.equal(connected.status, 101);
+  const ws = connected.webSocket; assert.ok(ws); ws.accept(); t.after(() => { try { ws.close(); } catch {} });
+  const rpcs = [];
+  ws.addEventListener("message", event => {
+    const frame = JSON.parse(event.data);
+    if (frame.type === "rpc") {
+      rpcs.push(frame);
+      ws.send(JSON.stringify({ type: "rpc_result", id: frame.id, result: { content: [{ type: "text", text: "synthetic paired-mac result" }] } }));
+    }
+  });
+  const heartbeat = new Promise(resolve => ws.addEventListener("message", event => {
+    if (JSON.parse(event.data).type === "heartbeat_ack") resolve();
+  }));
+  ws.send(JSON.stringify({ type: "heartbeat", mcpHealthy: true })); await heartbeat;
+
+  const mcp = (body, token = alice) => send("/mcp", browser, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", ...body }),
+    headers: { "cf-access-jwt-assertion": token, "content-type": "application/json", accept: "application/json, text/event-stream" } });
+  const read = await mcp({ id: 1, method: "tools/call", params: { name: "read_file", arguments: { path: "/synthetic/acceptance.txt" } } });
+  assert.equal(read.status, 200);
+  assert.ok((await read.text()).includes("synthetic paired-mac result"));
+  assert.equal(rpcs.length, 1, "the Access call reached exactly the paired Mac");
+  const denied = await mcp({ id: 2, method: "tools/call", params: { name: "start_process", arguments: { command: "true", idempotencyKey: "pairing-e2e-denied" } } });
+  assert.equal((await denied.json()).result.isError, true);
+  assert.equal(rpcs.length, 1, "terminal tool never reaches a file-only Mac");
+  assert.equal((await mcp({ id: 3, method: "tools/list", params: {} }, await assertion("mallory-subject"))).status, 401,
+    "same email, different verified subject has no route");
+
+  for (const sql of revokeDevice({ ownerId: device.owner_id, deviceId }).split(";").filter(s => s.trim())) await db.prepare(sql).run();
+  assert.equal((await mcp({ id: 4, method: "tools/list", params: {} })).status, 401);
+  assert.deepEqual(await (await pairStatus()).json(), { status: "cancelled", deviceId });
+  assert.equal((await signedStatus()).status, 403);
+  assert.equal(rpcs.length, 1);
+  assert.ok(outbound.length >= 1 && outbound.every(url => url === `${team}/cdn-cgi/access/certs`), outbound.join(","));
 });

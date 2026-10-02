@@ -4,7 +4,7 @@ import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { SignJWT, generateKeyPair, exportJWK } from 'jose';
 import worker from '../.test-tmp/index.mjs';
 import { sqliteRegistry } from './enrollment-sqlite.mjs';
-import { createPairingSession, claimPairingSession, pairingStatus, PAIR_TTL_MS } from '../.test-tmp/pairing.mjs';
+import { createPairingSession, claimPairingSession, pairingPreview, pairingStatus, PAIR_TTL_MS } from '../.test-tmp/pairing.mjs';
 import { signPairStart } from '../../installer/lib/account-pairing.mjs';
 const ORIGIN = 'https://relay.example';
 const TEAM = 'https://mobile-hardening.cloudflareaccess.com';
@@ -73,6 +73,25 @@ test('registry routing cannot fall back to a personal bearer in static mode', as
   assert.equal((await request(env, { bearer: env.MCP_BEARER_TOKEN })).status, 503);
   assert.equal(calls.length, 0);
 });
+test('explicit malformed auth mode never falls back to the personal bearer', async t => {
+  for (const mode of ['', '   ', null, 7, false, {}]) {
+    const { env, calls } = fixture(t, { ACCESS_DEVICE_ROUTING: undefined, MCP_AUTH_MODE: mode });
+    assert.equal((await request(env, { bearer: env.MCP_BEARER_TOKEN })).status, 503);
+    assert.equal(calls.length, 0);
+  }
+});
+test('malformed pairing routing returns a closed error before any registry access', async t => {
+  for (const routing of [null, false, 7, {}]) {
+    let reads = 0;
+    const { env } = fixture(t, { PAIRING_ENABLED: 'true', ACCESS_DEVICE_ROUTING: routing }, {
+      prepare() { reads++; throw new Error('must not query'); },
+    });
+    for (const path of ['/pair/start', '/pair/status', '/pair/claim']) {
+      assert.equal((await worker.fetch(new Request(ORIGIN + path), env)).status, 503);
+    }
+    assert.equal(reads, 0);
+  }
+});
 test('registry routing requires rate gates before any registry read', async t => {
   let queries = 0;
   const { env, calls } = fixture(t, { BETA_MCP_RATE: undefined }, { prepare() { queries++; throw new Error('must not query'); } });
@@ -125,7 +144,8 @@ async function pairingFixture(t) {
 for (const condition of ['unknown', 'expired', 'before-created']) {
   test(`pairing ${condition} grant creates no user, identity or device`, async t => {
     const { db, registry, session } = await pairingFixture(t);
-    const token = condition === 'unknown' ? 'ap1_' + '0'.repeat(64) : session.secret;
+    const preview = await pairingPreview(registry, session.claimCode, identity, NOW);
+    const token = condition === 'unknown' ? 'ac1_' + '0'.repeat(64) : preview.consent;
     const when = condition === 'expired' ? NOW + PAIR_TTL_MS : condition === 'before-created' ? NOW - 1 : NOW + 1;
     assert.equal(await claimPairingSession(registry, token, identity, when), null);
     for (const table of ['users', 'user_identities', 'devices']) assert.equal(db.prepare(`SELECT count(*) n FROM ${table}`).get().n, 0, table);
@@ -133,12 +153,57 @@ for (const condition of ['unknown', 'expired', 'before-created']) {
 }
 test('simultaneous claimants cannot both claim or create extra identities', async t => {
   const { db, registry, session } = await pairingFixture(t);
-  const claims = await Promise.all([identity, { ...identity, subject: 'bob-subject', email: 'bob@example.com' }].map(i => claimPairingSession(registry, session.secret, i, NOW + 1)));
+  const preview = await pairingPreview(registry, session.claimCode, identity, NOW);
+  const claims = await Promise.all([identity, identity].map(i => claimPairingSession(registry, preview.consent, i, NOW + 1)));
   assert.equal(claims.filter(Boolean).length, 1);
   for (const table of ['users', 'user_identities', 'devices']) assert.equal(db.prepare(`SELECT count(*) n FROM ${table}`).get().n, 1, table);
 });
 test('claimed pairing token expires too; it is not a permanent status credential', async t => {
   const { registry, session } = await pairingFixture(t);
-  assert.ok(await claimPairingSession(registry, session.secret, identity, NOW + 1));
+  const preview = await pairingPreview(registry, session.claimCode, identity, NOW);
+  assert.ok(await claimPairingSession(registry, preview.consent, identity, NOW + 1));
   assert.equal((await pairingStatus(registry, session.secret, NOW + PAIR_TTL_MS)).status, 'expired');
+});
+
+test('Worker claim requires verified Access, rejects email/bearer substitution, and binds same-email subjects separately', async t => {
+  const { db, registry, env, calls } = fixture(t, { PAIRING_ENABLED: 'true' });
+  db.exec('DELETE FROM user_identities; DELETE FROM devices; DELETE FROM users;');
+  const keys = generateKeyPairSync('ed25519');
+  const pub = keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  const session = await createPairingSession(registry, signPairStart(ORIGIN, randomUUID(), DEVICE, pub, keys.privateKey));
+  const post = (fields, headers) => worker.fetch(new Request(ORIGIN + '/pair/claim', {
+    method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', ...headers },
+    body: new URLSearchParams(fields),
+  }), env);
+  for (const headers of [{}, { 'cf-access-authenticated-user-email': identity.email },
+    { authorization: 'Bearer ' + session.secret }, { 'cf-access-jwt-assertion': 'invalid' }]) {
+    assert.equal((await post({ code: session.claimCode }, headers)).status, 401);
+  }
+  assert.equal(db.prepare('SELECT count(*) n FROM users').get().n, 0);
+  const assertion = await jwt();
+  const review = await post({ code: session.claimCode }, { 'cf-access-jwt-assertion': assertion });
+  assert.equal(review.status, 200);
+  const consent = (await review.text()).match(/name="consent" value="([^"]+)"/)[1];
+  const confirmation = { consent, scope: 'files-v1' };
+  assert.equal((await post(confirmation, { 'cf-access-jwt-assertion': await jwt('same-email-other-subject') })).status, 409);
+  assert.equal(db.prepare('SELECT count(*) n FROM users').get().n, 0);
+  assert.equal((await post(confirmation, { 'cf-access-jwt-assertion': assertion })).status, 200);
+  assert.equal((await request(env)).status, 200);
+  assert.equal(calls[0].deviceId, DEVICE);
+  assert.equal((await request(env, { token: await jwt('same-email-other-subject') })).status, 401);
+  db.exec("UPDATE user_identities SET status='revoked'");
+  assert.equal((await request(env)).status, 401);
+  assert.equal(calls.length, 1);
+});
+
+test('pairing rate rejection happens before registry access for start, claim and status', async t => {
+  let queries = 0;
+  const { env } = fixture(t, {
+    PAIRING_ENABLED: 'true', BETA_ENROLL_RATE: { limit: async () => ({ success: false }) },
+    BETA_REQUEST_RATE: { limit: async () => ({ success: false }) },
+  }, { prepare() { queries++; throw new Error('must not query'); } });
+  for (const path of ['/pair/start', '/pair/claim', '/pair/status']) {
+    assert.equal((await worker.fetch(new Request(ORIGIN + path), env)).status, 429);
+  }
+  assert.equal(queries, 0);
 });

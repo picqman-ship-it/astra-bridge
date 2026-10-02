@@ -40,7 +40,7 @@ test("pair HTTP flow starts, previews, claims and reports completion without ena
   assert.equal(start.ok, true);
   assert.equal(start.deviceId, DEVICE);
   assert.match(start.pairingToken, /^ap1_[a-f0-9]{64}$/);
-  assert.equal(start.claimUrl, ORIGIN + "/pair/claim?token=" + start.pairingToken);
+  assert.equal(start.claimUrl, ORIGIN + "/pair/claim");
 
   const identity = {
     issuer: "https://team.cloudflareaccess.com",
@@ -49,7 +49,7 @@ test("pair HTTP flow starts, previews, claims and reports completion without ena
   };
 
   const preview = await handlePairClaim(
-    new Request(start.claimUrl),
+    new Request(start.claimUrl, { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: start.claimCode }) }),
     registry,
     identity,
   );
@@ -59,6 +59,7 @@ test("pair HTTP flow starts, previews, claims and reports completion without ena
   assert.match(previewHtml, /Connect this Mac/);
   assert.match(previewHtml, /Initial access is file-only/);
   assert.match(previewHtml, new RegExp(DEVICE));
+  const consent = previewHtml.match(/name="consent" value="([^"]+)"/)[1];
 
   const claimed = await handlePairClaim(
     new Request(ORIGIN + "/pair/claim", {
@@ -67,7 +68,7 @@ test("pair HTTP flow starts, previews, claims and reports completion without ena
         origin: ORIGIN,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({ token: start.pairingToken }).toString(),
+      body: new URLSearchParams({ consent, scope: 'files-v1' }).toString(),
     }),
     registry,
     identity,
@@ -88,8 +89,8 @@ test("pair HTTP flow starts, previews, claims and reports completion without ena
   assert.equal(device.terminal_enabled, 0);
   assert.equal(device.status, "active");
 
-  const reused = await handlePairClaim(new Request(start.claimUrl), registry, identity);
-  assert.equal(reused.status, 410);
+  const reused = await handlePairClaim(new Request(start.claimUrl, { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: start.claimCode }) }), registry, identity);
+  assert.equal(reused.status, 409);
   db.close();
 });
 

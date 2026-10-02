@@ -1,6 +1,7 @@
 import { readBoundedBody } from "./bounded-body";
 import type { D1DatabaseLike } from "./beta-registry";
 import {
+  PAIR_CODE_PATTERN,
   PAIR_SECRET_PATTERN,
   claimPairingSession,
   createPairingSession,
@@ -52,7 +53,12 @@ code{word-break:break-all}button{font:inherit;padding:10px 16px}
     headers: {
       ...SECURITY_HEADERS,
       "content-type": "text/html; charset=utf-8",
+      // form-action 'self' also blocks a form POST from following a cross-origin
+      // redirect (for example an expired Access session), so code/confirmation
+      // bodies never leave this origin.
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "x-frame-options": "DENY",
+      "cross-origin-opener-policy": "same-origin",
     },
   });
 }
@@ -100,7 +106,8 @@ export async function handlePairStart(
     ok: true,
     deviceId: session.deviceId,
     expiresAtMs: session.expiresAtMs,
-    claimUrl: `${url.origin}/pair/claim?token=${encodeURIComponent(session.secret)}`,
+    claimUrl: `${url.origin}/pair/claim`,
+    claimCode: session.claimCode,
     pairingToken: session.secret,
   }, 201);
 }
@@ -127,22 +134,15 @@ export async function handlePairClaim(
   if (url.protocol !== "https:") return html("Pairing unavailable", "<p>Secure HTTPS is required.</p>", 400);
 
   if (request.method === "GET") {
-    if ([...url.searchParams.keys()].some((key) => key !== "token") || url.searchParams.getAll("token").length !== 1) {
+    if (url.search) {
       return html("Pairing unavailable", "<p>The pairing link is invalid.</p>", 400);
     }
-    const secret = url.searchParams.get("token") ?? "";
-    const preview = await pairingPreview(registry, secret);
-    if (!preview || preview.status !== "pending") {
-      return html("Pairing unavailable", "<p>This pairing request is invalid, expired, or already used.</p>", 410);
-    }
     return html("Connect this Mac to Astra", `
-<p>Confirm that this is the Mac you are pairing with your ChatGPT Astra plugin.</p>
-<p><strong>Device</strong><br><code>${escapeHtml(preview.deviceId)}</code></p>
-<p><strong>Mac key fingerprint (SHA-256)</strong><br><code>${escapeHtml(preview.fingerprint)}</code></p>
-<p class="warning">Initial access is file-only. Terminal and GUI control are not enabled by this step.</p>
-<form method="post" action="/pair/claim">
-<input type="hidden" name="token" value="${escapeHtml(secret)}">
-<button type="submit">Connect this Mac</button>
+<p>Signed in as <strong>${escapeHtml(identity.email)}</strong>.</p>
+<p>Enter the one-time code displayed by the Astra installer on your Mac. Only use a code from an installation you started. Each code works once, so submit it a single time.</p>
+<form method="post" action="/pair/claim" autocomplete="off">
+<label>Mac pairing code <input name="code" type="password" autocomplete="off" spellcheck="false" required maxlength="36"></label>
+<button type="submit">Review account and Mac</button>
 </form>`);
   }
 
@@ -159,13 +159,35 @@ export async function handlePairClaim(
   const raw = await boundedText(request, MAX_PAIR_CLAIM_BODY);
   if (raw === null) return html("Pairing unavailable", "<p>The request is too large or invalid.</p>", 413);
   const form = new URLSearchParams(raw);
-  if ([...form.keys()].some((key) => key !== "token") || form.getAll("token").length !== 1) {
+  if (form.size === 1 && form.getAll("code").length === 1) {
+    // Tolerate copy/paste whitespace and letter case. A malformed code never
+    // reaches the registry, so it cannot consume the real one.
+    const code = form.get("code")!.trim().toLowerCase();
+    if (!PAIR_CODE_PATTERN.test(code)) {
+      return html("Pairing unavailable", "<p>That is not a valid Astra pairing code. Check the code shown by the installer on your Mac and enter it again.</p>", 400);
+    }
+    const preview = await pairingPreview(registry, code, identity);
+    if (!preview) return html("Pairing unavailable", "<p>The code was not accepted. Check that it matches the code currently shown by the installer on your Mac. A code works once and expires five minutes after it is shown; if it was already used or has expired, run account pairing again on the same Mac after its ten-minute pairing session ends.</p>", 409);
+    return html("Confirm account and Mac", `
+<p><strong>Astra account</strong><br>${escapeHtml(identity.email)}</p>
+<p><strong>Identity provider</strong><br>${escapeHtml(identity.issuer)}</p>
+<p><strong>Device</strong><br><code>${escapeHtml(preview.deviceId)}</code></p>
+<p><strong>Mac key fingerprint (SHA-256)</strong><br><code>${escapeHtml(preview.fingerprint)}</code></p>
+<p>Compare this device and fingerprint with the installer on your Mac. If the account or Mac is wrong, close this page and restart pairing.</p>
+<p class="warning">Initial access is file-only within the folders allowed by your Mac. Terminal and GUI control are not enabled by this step.</p>
+<form method="post" action="/pair/claim" autocomplete="off">
+<input type="hidden" name="consent" value="${escapeHtml(preview.consent)}">
+<label><input type="checkbox" name="scope" value="files-v1" required> I authorize this Astra account to access files on this Mac.</label>
+<button type="submit">Connect this Mac</button>
+</form>`);
+  }
+  if (form.size !== 2 || form.getAll("consent").length !== 1
+    || form.getAll("scope").length !== 1 || form.get("scope") !== "files-v1") {
     return html("Pairing unavailable", "<p>The request is invalid.</p>", 400);
   }
-  const secret = form.get("token") ?? "";
-  const result = await claimPairingSession(registry, secret, identity);
+  const result = await claimPairingSession(registry, form.get("consent")!, identity);
   if (!result) {
-    return html("Could not connect Mac", "<p>The request expired, was already used, or this account already has an active Mac.</p>", 409);
+    return html("Could not connect Mac", "<p>The confirmation expired, was already used, or this account already has an active Mac. If you submitted it twice, the first submission may have succeeded; the installer on your Mac shows the result.</p>", 409);
   }
   return html("Mac connected", `
 <p>Astra is now bound to this Mac.</p>

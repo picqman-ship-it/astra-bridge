@@ -101,7 +101,8 @@ test("installer account-pairing opens only validated claim URL, polls in memory,
         ok: true,
         deviceId: DEVICE,
         expiresAtMs: now + 600_000,
-        claimUrl: BASE + "/pair/claim?token=" + TOKEN,
+        claimUrl: BASE + "/pair/claim",
+        claimCode: 'pc1_' + 'b'.repeat(32),
         pairingToken: TOKEN,
       }, { status: 201 });
     }
@@ -116,12 +117,13 @@ test("installer account-pairing opens only validated claim URL, polls in memory,
   await pairAccount(ctx, opts, ui, s, {
     fetchImpl,
     openBrowser: async url => { opened = url; return true; },
+    showCode: async () => true,
     wait: async () => { now += 2000; },
     clock: () => now,
     probe: async () => ({ ok: true, status: 200 }),
   });
 
-  assert.equal(opened, BASE + "/pair/claim?token=" + TOKEN);
+  assert.equal(opened, BASE + "/pair/claim");
   assert.equal(statusCalls, 2);
   assert.equal(readState(ctx).accountPairing.registered, true);
   const state = fs.readFileSync(ctx.stateFile, "utf8");
@@ -160,12 +162,13 @@ test("pairing rejects reflected/mismatched relay responses and never persists th
   for (const bad of [
     { ok: true, deviceId: DEVICE, expiresAtMs: now + 600_000, claimUrl: "https://evil.example/pair/claim?token=" + TOKEN, pairingToken: TOKEN },
     { ok: true, deviceId: DEVICE, expiresAtMs: now + 600_000, claimUrl: BASE + "/pair/claim?token=" + "ap1_" + "b".repeat(64), pairingToken: TOKEN },
-    { ok: true, deviceId: "beta-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", expiresAtMs: now + 600_000, claimUrl: BASE + "/pair/claim?token=" + TOKEN, pairingToken: TOKEN },
-    { ok: true, deviceId: DEVICE, expiresAtMs: now + 700_000, claimUrl: BASE + "/pair/claim?token=" + TOKEN, pairingToken: TOKEN },
+    { ok: true, deviceId: "beta-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", expiresAtMs: now + 600_000, claimUrl: BASE + "/pair/claim", pairingToken: TOKEN },
+    { ok: true, deviceId: DEVICE, expiresAtMs: now + 700_000, claimUrl: BASE + "/pair/claim", pairingToken: TOKEN },
+    { ok: true, deviceId: DEVICE, expiresAtMs: now + 600_000, claimUrl: BASE + "/pair/claim", pairingToken: TOKEN, claimCode: TOKEN },
   ]) {
     await assert.rejects(pairAccount(ctx, opts, ui, s, {
       fetchImpl: async url => {
-        if (url.pathname === "/pair/start") return Response.json(bad, { status: 201 });
+        if (url.pathname === "/pair/start") return Response.json({ claimCode: 'pc1_' + 'b'.repeat(32), ...bad }, { status: 201 });
         throw new Error("unexpected");
       },
       clock: () => now,

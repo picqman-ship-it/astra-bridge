@@ -39,13 +39,14 @@ for (const code of [undefined, 408, 409, 429, 503]) {
   });
 }
 function startResponse() {
-  return Response.json({ ok: true, deviceId: DEVICE, expiresAtMs: Date.now() + 600000, claimUrl: ORIGIN + '/pair/claim?token=' + TOKEN, pairingToken: TOKEN }, { status: 201 });
+  return Response.json({ ok: true, deviceId: DEVICE, expiresAtMs: Date.now() + 600000, claimUrl: ORIGIN + '/pair/claim', claimCode: 'pc1_' + 'b'.repeat(32), pairingToken: TOKEN }, { status: 201 });
 }
 test('claimed session alone cannot mark a device registered without signed device verification', async t => {
   const { ctx, opts, s, ui } = fixture(t); let signedChecks = 0;
   await assert.rejects(pairAccount(ctx, opts, ui, s, {
     fetchImpl: async url => url.pathname === '/pair/start' ? startResponse() : Response.json({ status: 'claimed', deviceId: DEVICE }),
     openBrowser: async () => true,
+    showCode: async () => true,
     probe: async () => { signedChecks++; return { ok: false, status: 503 }; },
   }), /signed|verified|verification/i);
   assert.equal(signedChecks, 1); assert.equal(readState(ctx).accountPairing.registered, false);
@@ -59,11 +60,11 @@ test('browser launch errors do not reflect a short-lived pairing secret into the
 });
 
 test('browser handoff does not expose the pairing token in command arguments', async () => {
-  const url = ORIGIN + '/pair/claim?token=' + TOKEN;
+  const url = ORIGIN + '/pair/claim';
   let called = false;
   assert.equal(await openPairingBrowser(url, { runImpl(command, args, options) {
     called = true; assert.equal(command, '/usr/bin/osascript'); assert.deepEqual(args, ['-']);
-    assert.equal(JSON.stringify(args).includes(TOKEN), false); assert.ok(options.input.includes(TOKEN));
+    assert.equal(JSON.stringify(args).includes(TOKEN), false); assert.ok(!options.input.includes(TOKEN));
     return { status: 0, error: null };
   } }), true);
   assert.equal(called, true);

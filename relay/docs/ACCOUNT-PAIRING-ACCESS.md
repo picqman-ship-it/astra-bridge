@@ -72,9 +72,13 @@ The MCP request cannot submit a device id.
 
 `POST /pair/start` is intentionally public because an unpaired Mac does not have a user session yet. It is safe only because it requires possession of the proposed Mac's Ed25519 private key and creates no user/device authorization by itself.
 
-`GET/POST /pair/claim` is the authority boundary. Only the authenticated browser identity can consume the short-lived pairing session and create the ownership record.
+`GET/POST /pair/claim` is the authority boundary. The installer opens exactly `/pair/claim`, with no credential in its URL. It then shows a separate five-minute, one-time browser code in a local macOS dialog. With a verified Access assertion, the browser POSTs that code. Review consumes the code once and returns a confirmation value bound to the verified issuer, subject, email, session device/key and `files-v1` scope. A second POST, with the explicit file-access checkbox, rechecks all of those inside the D1 batch that creates the identity→owner→device binding. Email alone, caller-selected device ids and a second active Mac are refused.
 
-`GET /pair/status` only reveals the state of the one short-lived session represented by its high-entropy bearer. The installer keeps that bearer in memory and never writes it to installer state.
+`GET /pair/status` only reveals the state of the one short-lived session represented by its high-entropy bearer. It reports `cancelled`, not `claimed`, once the bound identity, user or device is no longer active. The installer keeps that bearer in memory and never writes it to installer state, logs or the browser.
+
+## Logging and redaction
+
+The Worker writes no request logs. The template sets `observability.logs.invocation_logs = false`. If invocation/tail logging is enabled later, Cloudflare's default tail redaction replaces header values whose names contain `auth`, `jwt` or `token`. That covers the `/pair/status` bearer and the Access assertion. Request bodies (code and confirmation) are not part of tail events. No pairing credential is ever placed in a URL. Treat this as defense in depth and verify it in staging; it is not a guarantee about every Cloudflare product's logs.
 
 ## Rollout rule
 
@@ -90,4 +94,4 @@ Only then consider promotion.
 
 ## Latest verification and open gates
 
-See `../../docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md`. Account pairing additionally requires coherent Access/registry routing, migration 0006, and the existing rate bindings. No new feature has been deployed. Browser claim-token handling and real fresh-account ChatGPT mobile acceptance remain rollout gates.
+See `../../docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md`. Account pairing additionally requires coherent Access/registry routing, migrations 0006 and 0007, and the existing rate bindings. With the example limits, each pairing spends three to four `BETA_ENROLL_RATE` requests per browser/Mac address: start, code-entry page, code review and confirmation. Check that budget in staging. No new feature has been deployed. Real Access login/expiry redirects and fresh-account ChatGPT mobile acceptance remain rollout gates.
