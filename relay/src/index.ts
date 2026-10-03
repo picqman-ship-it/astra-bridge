@@ -12,6 +12,7 @@ import { isBetaDeviceId, isPersonalDeviceId } from "./beta-identity";
 import { handleOAuthRoute, oauthConfig, verifyOAuthAccessToken, type OAuthEnv } from "./oauth";
 import { hasValidIdempotencyKey, IDEMPOTENCY_REQUIRED, isToolApproved } from "./tool-policy";
 import { handlePairClaim, handlePairStart, handlePairStatus } from "./pairing-http";
+import { applyControlPermissionRequest, cancelControlPermissionRequest, controlAgentFingerprint, controlIdentityFingerprint, controlPermissionRequestStatus, resolveControlDeviceState, startControlPermissionRequest, type ControlTarget } from "./control-permissions";
 
 export { OAuthStore } from "./oauth-store";
 
@@ -31,6 +32,8 @@ interface Env extends OAuthEnv, AccessEnv, BetaRateEnv {
   ACCESS_DEVICE_ROUTING?: string;
   /** Explicit opt-in for the account/device pairing endpoints. */
   PAIRING_ENABLED?: string;
+  /** Explicit opt-in for signed post-pairing terminal/GUI permission changes. */
+  CONTROL_PERMISSIONS_ENABLED?: string;
   // Liveness alerting (see scheduled() below). Absent in tests/dry-run: alerting then
   // no-ops instead of throwing, so a missing binding never breaks agent-state bookkeeping.
   ALERT_EMAIL?: SendEmail;
@@ -183,6 +186,87 @@ async function verifySignedRequest(
     );
   } catch {
     return false;
+  }
+}
+
+function parseControlTargetBody(body: Uint8Array): { requestId: string; target: ControlTarget } | null {
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder().decode(body)); } catch { return null; }
+  if (!isRecord(value) || Object.keys(value).sort().join(",") !== "guiEnabled,requestId,terminalEnabled,version"
+    || value.version !== 1 || typeof value.requestId !== "string"
+    || typeof value.terminalEnabled !== "boolean" || typeof value.guiEnabled !== "boolean") return null;
+  return { requestId: value.requestId, target: { terminalEnabled: value.terminalEnabled, guiEnabled: value.guiEnabled } };
+}
+
+async function handleControlPermissionRoute(request: Request, env: Env, url: URL): Promise<Response> {
+  if (env.CONTROL_PERMISSIONS_ENABLED !== "true" || env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {
+    return json({ error: "not_found" }, 404);
+  }
+  if (mcpAuthMode(env) !== "access" || typeof env.ACCESS_DEVICE_ROUTING !== "string"
+    || env.ACCESS_DEVICE_ROUTING.trim().toLowerCase() !== "registry") {
+    return json({ error: "service_unavailable" }, 503);
+  }
+  const current = url.pathname.match(/^\/control\/device\/([A-Za-z0-9][A-Za-z0-9._-]{0,95})\/(status|start|apply|cancel)$/);
+  const requestStatus = url.pathname.match(/^\/control\/device\/([A-Za-z0-9][A-Za-z0-9._-]{0,95})\/request\/([0-9a-f-]{36})\/status$/);
+  if (!current && !requestStatus) return json({ error: "not_found" }, 404);
+  const deviceId = (current ?? requestStatus)![1];
+  if (!isBetaDeviceId(deviceId) || [env.AGENT_DEVICE_ID, env.CLIENT_DEVICE_ID, env.MCP_DEVICE_ID].includes(deviceId)) {
+    return json({ error: "unauthorized" }, 403);
+  }
+  const action = requestStatus ? "request-status" : current![2];
+  const expectedMethod = action === "status" || action === "request-status" ? "GET" : "POST";
+  if (request.method !== expectedMethod || url.protocol !== "https:" || url.search) {
+    return json({ error: "bad_request" }, 400, request.method !== expectedMethod ? { Allow: expectedMethod } : {});
+  }
+  if (!authShapeOk(request)) return json({ error: "unauthorized" }, 401);
+  const limited = await betaRateGate(request, env, expectedMethod === "GET" ? "status" : "connect");
+  if (limited) return limited;
+  let body: Uint8Array;
+  try { body = await readBodyBounded(request); }
+  catch (err) { return json({ error: err instanceof BodyTooLargeError ? "request_too_large" : "bad_request" }, err instanceof BodyTooLargeError ? 413 : 400); }
+  try {
+    const auth = await resolveAgentAuthentication(env, deviceId);
+    if (!auth?.beta || !(await verifySignedRequest(request, auth.publicKeyB64, body))) return json({ error: "unauthorized" }, 403);
+    if (action === "status") {
+      const state = await resolveControlDeviceState(env.BETA_REGISTRY, deviceId);
+      if (!state || state.agentPublicKeyB64 !== auth.publicKeyB64) return json({ error: "unauthorized" }, 403);
+      return json({ ok: true, deviceId, accountEmail: state.identityEmail, identityIssuer: state.identityIssuer,
+        identityFingerprint: await controlIdentityFingerprint(state.identityIssuer, state.identitySubject),
+        agentFingerprint: await controlAgentFingerprint(state.agentPublicKeyB64),
+        terminalEnabled: state.terminalEnabled, guiEnabled: state.guiEnabled });
+    }
+    if (action === "request-status") {
+      const status = await controlPermissionRequestStatus(env.BETA_REGISTRY, deviceId, requestStatus![2]);
+      if (!status || status.agentPublicKeyB64 !== auth.publicKeyB64) return json({ error: "not_found" }, 404);
+      return json({ ok: true, deviceId, requestId: status.requestId, status: status.status,
+        accountEmail: status.identityEmail, identityIssuer: status.identityIssuer,
+        identityFingerprint: status.identityFingerprint, agentFingerprint: status.agentFingerprint,
+        previousTerminal: status.previousTerminal, previousGui: status.previousGui,
+        requestedTerminal: status.requestedTerminal, requestedGui: status.requestedGui,
+        terminalEnabled: status.terminalEnabled, guiEnabled: status.guiEnabled, expiresAtMs: status.expiresAtMs });
+    }
+    const parsed = parseControlTargetBody(body);
+    if (!parsed) return json({ error: "bad_request" }, 400);
+    if (action === "start") {
+      const preview = await startControlPermissionRequest(env.BETA_REGISTRY, deviceId, auth.publicKeyB64, parsed.requestId, parsed.target);
+      if (!preview) return json({ error: "control_conflict" }, 409);
+      return json({ ok: true, deviceId, requestId: preview.requestId, status: preview.status,
+        accountEmail: preview.identityEmail, identityIssuer: preview.identityIssuer,
+        identityFingerprint: preview.identityFingerprint, agentFingerprint: preview.agentFingerprint,
+        previousTerminal: preview.previousTerminal, previousGui: preview.previousGui,
+        requestedTerminal: preview.requestedTerminal, requestedGui: preview.requestedGui, expiresAtMs: preview.expiresAtMs }, 201);
+    }
+    if (action === "apply") {
+      const applied = await applyControlPermissionRequest(env.BETA_REGISTRY, deviceId, auth.publicKeyB64, parsed.requestId, parsed.target);
+      if (!applied) return json({ error: "control_denied" }, 409);
+      return json({ ok: true, deviceId, requestId: applied.requestId, status: applied.status,
+        terminalEnabled: applied.terminalEnabled, guiEnabled: applied.guiEnabled });
+    }
+    const cancelled = await cancelControlPermissionRequest(env.BETA_REGISTRY, deviceId, auth.publicKeyB64, parsed.requestId);
+    return cancelled ? json({ ok: true, deviceId, requestId: parsed.requestId, status: "cancelled" })
+      : json({ error: "control_denied" }, 409);
+  } catch {
+    return json({ error: "service_unavailable" }, 503);
   }
 }
 
@@ -344,6 +428,10 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/beta/enroll") return handleEnrollment(request, env);
+
+    if (url.pathname.startsWith("/control/device/")) {
+      return handleControlPermissionRoute(request, env, url);
+    }
 
     if (url.pathname === "/pair/start" || url.pathname === "/pair/status" || url.pathname === "/pair/claim") {
       if (env.PAIRING_ENABLED !== "true" || env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) {

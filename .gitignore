@@ -28,3 +28,6 @@ remote.json
 # local noise
 .DS_Store
 *.log
+
+# Local-only synthetic verification logs and runner state.
+relay/.local-evidence/

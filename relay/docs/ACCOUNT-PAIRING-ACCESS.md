@@ -31,6 +31,7 @@ Public at the Access edge, but independently authenticated/limited by the Worker
 - `/beta/enroll` — invited enrollment; one-time invite + proof of key possession + rate limit
 - `/pair/start` — proof-of-key-possession + short-lived session + rate limit
 - `/pair/status` — short-lived pairing bearer only + rate limit
+- `/control/device/*` — separately enabled post-pairing permissions; the exact active registry Mac's fresh Ed25519 signature + rate limit, never browser/MCP authority
 
 Do **not** make `/pair/claim` public. The origin requires a cryptographically verified Access assertion before it binds an external identity to a Mac.
 
@@ -50,6 +51,8 @@ ACCESS_DEVICE_ROUTING=registry
 PAIRING_ENABLED=true
 BETA_REGISTRY_ENABLED=true
 BETA_REGISTRY=<D1 binding>
+# Separate post-pairing permission service only:
+CONTROL_PERMISSIONS_ENABLED=true
 TEAM_DOMAIN=https://<team>.cloudflareaccess.com
 POLICY_AUD=<Access application audience>
 ```
@@ -76,6 +79,20 @@ The MCP request cannot submit a device id.
 
 `GET /pair/status` only reveals the state of the one short-lived session represented by its high-entropy bearer. It reports `cancelled`, not `claimed`, once the bound identity, user or device is no longer active. The installer keeps that bearer in memory and never writes it to installer state, logs or the browser.
 
+## Separate post-pairing terminal/GUI opt-in
+
+Initial pairing remains `files-v1`; migration 0007's file-only CHECK is preserved. Additive migration `0008_control_permissions.sql` supplies independent terminal/GUI overlays and five-minute permission requests. Apply migrations 0001–0008 to a reviewed isolated database before deploying this source, even if the permission endpoint is disabled: registry routing reads the overlay table.
+
+`CONTROL_PERMISSIONS_ENABLED=true` is an additional service gate, not permission consent. An already account-paired Mac must run the local `./install-macos.sh permissions --enable-terminal` and/or `--enable-gui` review, inspect the exact account/provider/identity fingerprint/device/key/capabilities and type `enable`. `permissions --disable-terminal`, `--disable-gui` or `--file-only` reduce them. Full offline commands and recovery/offboarding limits are in [the installer reference](../../installer/README.md).
+
+The Mac-side command cannot complete interactive Access login, so the Access application needs a public-edge override for `/control/device/*`. The Worker independently requires an HTTPS, method/path/body-bound fresh signature from that exact active registry Mac. Request status and apply remain bound to the reviewed owner, issuer + subject, key, previous/target permissions and request ID; unknown responses do not grant control. Never turn `/pair/claim` public to make this flow work.
+
+Every hosted action re-resolves the identity and active device/grants. Local `remote.json` separately enforces capabilities and a restart must be verified before configured state proves running authority. No remotely callable MCP tool can change permissions. Reduction still removes local control if the permission service is unavailable and reports unresolved server state.
+
+Existing owner-only/self-deploy uses its existing local flags. An invited-beta bearer without an explicit overlay retains the earlier terminal-enabled GUI compatibility; an overlay supplies independent terminal/GUI grants, binds the exact agent key and issuer/subject/email, and reduces authority on the bearer route too. A changed binding denies its authority. New account pairing always starts file-only.
+
+Terminal is remote-shell-equivalent authority as the macOS user and is not confined by workspace roots; the GUI flag does not isolate GUI from arbitrary shell access. GUI requires the human's macOS Accessibility approval and can act outside the approved folder. Tracked durable-job shutdown cannot recall arbitrary detached shell processes.
+
 ## Logging and redaction
 
 The Worker writes no request logs. The template sets `observability.logs.invocation_logs = false`. If invocation/tail logging is enabled later, Cloudflare's default tail redaction replaces header values whose names contain `auth`, `jwt` or `token`. That covers the `/pair/status` bearer and the Access assertion. Request bodies (code and confirmation) are not part of tail events. No pairing credential is ever placed in a URL. Treat this as defense in depth and verify it in staging; it is not a guarantee about every Cloudflare product's logs.
@@ -94,4 +111,4 @@ Only then consider promotion.
 
 ## Latest verification and open gates
 
-See `../../docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md`. Account pairing additionally requires coherent Access/registry routing, migrations 0006 and 0007, and the existing rate bindings. With the example limits, each pairing spends three to four `BETA_ENROLL_RATE` requests per browser/Mac address: start, code-entry page, code review and confirmation. Check that budget in staging. No new feature has been deployed. Real Access login/expiry redirects and fresh-account ChatGPT mobile acceptance remain rollout gates.
+See `../../docs/CHATGPT-MOBILE-HANDOFF-2026-10-02.md`. Account pairing additionally requires coherent Access/registry routing and the existing rate bindings. This source also requires additive migration 0008 before deployment; the permission endpoint needs its separate explicit flag and local consent. With the example limits, each pairing spends three to four `BETA_ENROLL_RATE` requests per browser/Mac address: start, code-entry page, code review and confirmation. Check that budget in staging. No new feature has been deployed. Real Access login/expiry redirects and fresh-account ChatGPT mobile acceptance remain rollout gates.

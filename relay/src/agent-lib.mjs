@@ -44,6 +44,12 @@ export function agentConfig(env, { homedir, execPath }) {
   const expectedHost = env.ASTRA_RELAY_HOST;
   if (!expectedHost) throw new Error("ASTRA_RELAY_HOST is required");
   const relayBase = validateRelayUrl(env.ASTRA_RELAY_URL, expectedHost);
+  const accountControlStateFile = env.ASTRA_ACCOUNT_CONTROL_STATE_FILE;
+  if (accountControlStateFile !== undefined && (typeof accountControlStateFile !== "string"
+    || !path.isAbsolute(accountControlStateFile) || path.resolve(accountControlStateFile) !== accountControlStateFile
+    || /[\u0000-\u001f\u007f]/.test(accountControlStateFile))) {
+    throw new Error("account control state path must be absolute and contain no control characters");
+  }
   const deviceId = env.ASTRA_DEVICE_ID;
   if (!deviceId) throw new Error("ASTRA_DEVICE_ID is required");
   if (!DEVICE_ID_RE.test(deviceId)) throw new Error("ASTRA_DEVICE_ID must match [a-zA-Z0-9._-]{1,96}");
@@ -51,6 +57,7 @@ export function agentConfig(env, { homedir, execPath }) {
     relayBase,
     expectedHost,
     deviceId,
+    accountControlStateFile: accountControlStateFile ?? null,
     keyFile: env.ASTRA_AGENT_KEY_FILE || `${homedir}/.astra-bridge/agent-private.pem`,
     nodePath: env.ASTRA_NODE || execPath,
     commanderEntry: env.ASTRA_COMMANDER_ENTRY || `${homedir}/projects/mcp-commander/dist/remote-stdio.js`,

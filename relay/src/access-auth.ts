@@ -101,6 +101,7 @@ export type AccessDevicePrincipal = {
   ownerId: string;
   deviceId: string;
   terminalEnabled: boolean;
+  guiEnabled: boolean;
 };
 
 export type AccessPrincipalResolver = (
@@ -157,13 +158,13 @@ export async function authenticateAccessRequest(
   const resolved = resolvePrincipal
     ? await resolvePrincipal(identity)
     : deviceId
-      ? { ownerId: "owner", deviceId, terminalEnabled: true }
+      ? { ownerId: "owner", deviceId, terminalEnabled: true, guiEnabled: true }
       : null;
   if (!resolved) return null;
 
   return {
     kind: "access",
     ...resolved,
-    scopes: resolved.terminalEnabled ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE],
+    scopes: (resolved.terminalEnabled || resolved.guiEnabled) ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE],
   };
 }

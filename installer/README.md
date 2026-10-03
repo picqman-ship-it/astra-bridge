@@ -5,7 +5,7 @@
 | File | Role |
 |---|---|
 | `../install-macos.sh` | Checks for macOS and Node.js 22+, then starts `astra-macos.mjs`. Never installs anything, never uses sudo. |
-| `astra-macos.mjs` | Command line: `install` (default), `doctor`, `uninstall`. |
+| `astra-macos.mjs` | Command line: `install` (default), `doctor`, `uninstall`, `permissions` for an already account-paired Mac. |
 | `lib/install.mjs` | The guided steps, in order (below). |
 | `lib/doctor.mjs` | Read-only health check. |
 | `lib/uninstall.mjs` | Conservative removal. |
@@ -43,7 +43,29 @@ Non-interactive runs (`--non-interactive`, or stdin not a terminal) never guess:
 
 ### Terminal and GUI tools
 
-Off by default and never turned on implicitly. `--enable-terminal` / `--enable-gui` print what they grant, require typing `enable` in an interactive terminal, update only those flags in `remote.json`, and restart the agent so the change takes effect (mcp-commander reads its config only at startup). `--file-only` turns both off again. See [../SECURITY.md](../SECURITY.md).
+Off by default and never turned on implicitly. For personal self-deploy, `--enable-terminal` / `--enable-gui` print what they grant, require typing `enable` in an interactive terminal, update only those flags in `remote.json`, and restart the agent so the change takes effect (mcp-commander reads its config only at startup). `--file-only` turns both off again. See [../SECURITY.md](../SECURITY.md).
+
+Account pairing always begins with explicit `files-v1` consent and both control capabilities off. An **already account-paired Mac** uses the separate local command:
+
+```sh
+./install-macos.sh permissions --enable-terminal
+./install-macos.sh permissions --enable-gui
+./install-macos.sh permissions --disable-terminal
+./install-macos.sh permissions --disable-gui
+./install-macos.sh permissions --file-only
+```
+
+These are alternative changes, not a script to run automatically. Review the displayed account/provider, issuer + subject identity fingerprint, device ID, locally verified key fingerprint and current/target permissions. Elevation requires typing `enable` interactively; `--yes` does not approve it. GUI approval additionally requires the compiled helper, an unlocked on-console Mac, and Accessibility already granted by the human through System Settings. Never edit TCC or automate its approval.
+
+Terminal is equivalent to a remote shell running as your macOS user, including process and durable-job tools. Workspace roots restrict file/search tools only, not shells or interpreters; terminal permission does not promise GUI isolation. GUI permits reading/operating app windows beyond those roots. The protocol advertises terminal and GUI as independent account-paired capabilities.
+
+The hosted service requires additive migration 0008 and explicit `CONTROL_PERMISSIONS_ENABLED=true`, Access/registry routing, D1 and rate bindings; see [the Access configuration](../relay/docs/ACCOUNT-PAIRING-ACCESS.md). There is no MCP tool to elevate permissions. Each request checks the active account/device/grants, and the Mac independently enforces `remote.json`.
+
+Elevation verifies the restarted local agent before granting server authority. Reduction attempts to remove server authority first, then removes local control even if the service or server apply is unavailable; unresolved server authority is explicitly reported. Removing terminal permission disables new durable submissions, cancels queued jobs and verifies recorded worker/job process groups stopped. Detached programs outside those groups need separate local inspection. An unconfirmed shutdown blocks another terminal opt-in; cancelled work stays cancelled.
+
+Interrupted changes keep a transaction pending until server and running-agent verification complete. Matching saved flags alone do not complete an unreviewed elevation. If local/server state differs, run `permissions --file-only` to reconcile before enabling again; follow any reported local recovery instruction. An unchanged elevated request still requires a completed matching local review and verifies the running agent. Ordinary install/restart must not silently restore a permission.
+
+Source defaults and the release origin pin remain unchanged. These commands describe the source mechanism; they do not authorize deployment, installation or control on a real Mac.
 
 ## Doctor
 
@@ -74,6 +96,26 @@ The tests never touch your real `~/.astra-bridge`, `~/.mcp-commander-remote`, `~
 ## Distribution and signing
 
 This MVP is distributed as source: `git clone`, or a source archive made with `installer/build-source-release.sh` (reproducible for a given commit, with a `.sha256` to verify). Nothing in this repository is code-signed or notarized, and nothing claims to be.
+
+The canonical builder packages a **committed revision only**, using `git archive` and `gzip -n -9`. Uncommitted edits are omitted. Its product paths include this installer reference and `relay/docs/`, but exclude root `docs/`, dependencies, Git history and runtime state.
+
+For a local committed-source gate, keep at least 5 GiB free and use a new output directory; do not install the resulting archive:
+
+```sh
+task_revision=$(git rev-parse HEAD)
+task_gate=$(mktemp -d "${TMPDIR:-/tmp}/astra-source-gate-20261003.XXXXXX")
+sh installer/build-source-release.sh "$task_revision" --out "$task_gate/a"
+sh installer/build-source-release.sh "$task_revision" --out "$task_gate/b"
+task_archive=$(basename "$task_gate/a/"*.tar.gz)
+cmp "$task_gate/a/$task_archive" "$task_gate/b/$task_archive"
+cmp "$task_gate/a/$task_archive.sha256" "$task_gate/b/$task_archive.sha256"
+(cd "$task_gate/a" && shasum -a 256 -c "$task_archive.sha256")
+tar -tzf "$task_gate/a/$task_archive"
+```
+
+Inspect the archive listing before extracting into a new directory: every entry must be beneath its single expected source prefix, with no absolute/traversal path or escaping link. Record the exact commit, archive hash and tool versions. After safe extraction, run locked `npm ci` in the extracted `mcp-commander/` and `relay/`, then each package's tests/typecheck and `(cd installer && npm test)` as described above, from that extracted source. Use only the test suites, which create their own sandboxes; do not run install, deploy, service setup or live smoke commands.
+
+A plain archive has no `.git`: the installer test named “source release helper: the same commit gives byte-identical archives with only tracked files” must skip with “not a git checkout”. That one expected archive skip is verified by the two-build comparison above and by the same test passing in the source checkout. No other skip is expected on the prepared macOS environment; missing dependencies or failed D1/workerd/native prerequisites are failures. Keep canonical committed-source and separately origin-pinned staging artifacts/checksums distinct.
 
 There is deliberately no `.pkg` yet:
 
@@ -108,3 +150,5 @@ network/timeout outcomes. Repeated runs recover committed lost responses.
 Personal compatibility: existing `beta-*` IDs keep working with the beta registry
 disabled. Doctor flags these IDs so the operator can rename them before setting
 `BETA_REGISTRY_ENABLED=true`, which enforces the reserved namespace.
+
+Account-paired LaunchAgents carry the non-secret `ASTRA_ACCOUNT_CONTROL_STATE_FILE` marker for this installation’s protected `install-state.json`. The agent checks the completed review on every tool request, including after reboot or KeepAlive restart. Pending, missing, malformed or mismatched state hides and denies terminal, jobs, GUI and control telemetry while reviewed file operations remain available. Completion opens only the separately reviewed capabilities; unmarked personal and invited-beta agents keep their previous behavior. `permissions --file-only` always stops tracked jobs, even when stored flags already say off.

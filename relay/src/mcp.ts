@@ -123,14 +123,14 @@ export async function authenticateMcpRequest(
     && await equalSecret(candidate, env.MCP_BEARER_TOKEN)) {
     if (!env.MCP_DEVICE_ID) return null;
     return {
-      kind: "personal", ownerId: "personal", deviceId: env.MCP_DEVICE_ID, terminalEnabled: true, scopes: OAUTH_SCOPES,
+      kind: "personal", ownerId: "personal", deviceId: env.MCP_DEVICE_ID, terminalEnabled: true, guiEnabled: true, scopes: OAUTH_SCOPES,
     };
   }
   if (auth.verifyAccessToken) {
     const scopes = await auth.verifyAccessToken(candidate);
     if (scopes) {
       if (!env.MCP_DEVICE_ID || scopes.length === 0) return null;
-      return { kind: "oauth", ownerId: "owner", deviceId: env.MCP_DEVICE_ID, terminalEnabled: true, scopes };
+      return { kind: "oauth", ownerId: "owner", deviceId: env.MCP_DEVICE_ID, terminalEnabled: true, guiEnabled: true, scopes };
     }
   }
   return null;
@@ -144,7 +144,7 @@ export async function authenticateBetaMcpRequest(
   const candidate = await bearerToken(request);
   if (!candidate || candidate.length > 512) return null;
   const beta = await resolveBetaBearerHash(env.BETA_REGISTRY, await hashBearerToken(candidate));
-  return beta ? { kind: "beta", ...beta, scopes: beta.terminalEnabled ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE] } : null;
+  return beta ? { kind: "beta", ...beta, scopes: (beta.terminalEnabled || beta.guiEnabled) ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE] } : null;
 }
 
 /**

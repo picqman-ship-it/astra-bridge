@@ -168,7 +168,7 @@ class MockRegistry {
           const user = token && this.users.find((entry) => entry.user_id === token.owner_id);
           if (!token || !device || !user || token.status !== "active" || token.revoked_at || user.status !== "active"
             || device.status !== "active" || device.revoked_at || (token.expires_at && token.expires_at <= now)) return null;
-          return { owner_id: token.owner_id, device_id: token.device_id, terminal_enabled: device.terminal_enabled };
+          return { owner_id: token.owner_id, device_id: token.device_id, terminal_enabled: device.terminal_enabled, gui_enabled: device.terminal_enabled };
         }
         if (sql.includes("FROM devices")) {
           const [deviceId] = bound;
@@ -209,10 +209,10 @@ async function betaFixture() {
 test("a beta token hash resolves only its bound active device", async () => {
   const { registry, hashA, hashB } = await betaFixture();
   assert.deepEqual(await resolveBetaBearerHash(registry, hashA), {
-    ownerId: "user-alpha", deviceId: betaId("alpha"), terminalEnabled: false,
+    ownerId: "user-alpha", deviceId: betaId("alpha"), terminalEnabled: false, guiEnabled: false,
   });
   assert.deepEqual(await resolveBetaBearerHash(registry, hashB), {
-    ownerId: "user-bravo", deviceId: betaId("bravo"), terminalEnabled: true,
+    ownerId: "user-bravo", deviceId: betaId("bravo"), terminalEnabled: true, guiEnabled: true,
   });
   assert.equal((await resolveActiveBetaDevice(registry, betaId("alpha"))).agentPublicKeyB64, registry.devices[0].agent_public_key_b64);
 });
@@ -266,6 +266,33 @@ test("terminal-disabled beta principals filter and block process and durable-com
   assert.deepEqual(calls, [{ action: "tools/list" }]);
 });
 
+test("hosted terminal permission does not imply GUI permission", async () => {
+  const principal = { kind: "access", ownerId: "user", deviceId: betaId("split-terminal"), terminalEnabled: true, guiEnabled: false, scopes: ["astra.read", "astra.write", "astra.control"] };
+  const relay = async (payload) => payload.action === "tools/list" ? { tools: [...tools,
+    { name: "list_windows", description: "gui", inputSchema: { type: "object", properties: {} } },
+    { name: "inspect_ui", description: "gui", inputSchema: { type: "object", properties: {} } },
+  ] } : { content: [] };
+  const response = await handleMcpRequest(request({ jsonrpc: "2.0", id: 90, method: "tools/list", params: {} }), mcpEnv(), relay, { authenticate: async () => principal });
+  const names = (await response.json()).result.tools.map(tool => tool.name);
+  assert.equal(names.includes("start_process"), true);
+  assert.equal(names.includes("list_windows"), false);
+  assert.equal(names.includes("inspect_ui"), false);
+});
+
+test("hosted GUI permission does not imply terminal/process permission", async () => {
+  const principal = { kind: "access", ownerId: "user", deviceId: betaId("split-gui"), terminalEnabled: false, guiEnabled: true, scopes: ["astra.read", "astra.write", "astra.control"] };
+  const relay = async (payload) => payload.action === "tools/list" ? { tools: [...tools,
+    { name: "list_windows", description: "gui", inputSchema: { type: "object", properties: {} } },
+    { name: "inspect_ui", description: "gui", inputSchema: { type: "object", properties: {} } },
+  ] } : { content: [] };
+  const response = await handleMcpRequest(request({ jsonrpc: "2.0", id: 91, method: "tools/list", params: {} }), mcpEnv(), relay, { authenticate: async () => principal });
+  const names = (await response.json()).result.tools.map(tool => tool.name);
+  assert.equal(names.includes("list_windows"), true);
+  assert.equal(names.includes("inspect_ui"), true);
+  assert.equal(names.includes("start_process"), false);
+  assert.equal(names.includes("job_start"), false);
+});
+
 test("beta disabled preserves personal auth and ignores a registry binding", async () => {
   const { registry } = await betaFixture();
   const principals = [];
@@ -275,8 +302,22 @@ test("beta disabled preserves personal auth and ignores a registry binding", asy
   const disabled = await handleMcpRequest(request(message), mcpEnv({ BETA_REGISTRY_ENABLED: "false", BETA_REGISTRY: registry }), relay);
   assert.deepEqual(await disabled.json(), await baseline.json());
   const personal = {
-    kind: "personal", ownerId: "personal", deviceId: "test-device", terminalEnabled: true,
+    kind: "personal", ownerId: "personal", deviceId: "test-device", terminalEnabled: true, guiEnabled: true,
     scopes: ["astra.read", "astra.write", "astra.control"],
   };
   assert.deepEqual(principals, [personal, personal]);
+});
+
+
+test("legacy invited beta terminal grant keeps its previously approved GUI tools", async () => {
+  const { registry, tokenB } = await betaFixture();
+  const env = mcpEnv({ BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: registry });
+  const auth = { authenticate: request => authenticateBetaMcpRequest(request, env) };
+  const legacyTools = [...tools, { name: "list_windows", inputSchema: { type: "object", properties: {} } }];
+  const relay = async payload => payload.action === "tools/list" ? { tools: legacyTools } : { content: [] };
+  const listed = await handleMcpRequest(request({ jsonrpc: "2.0", id: 92, method: "tools/list", params: {} },
+    { headers: { authorization: `Bearer ${tokenB}` } }), env, relay, auth);
+  const names = (await listed.json()).result.tools.map(tool => tool.name);
+  assert.ok(names.includes("start_process"));
+  assert.ok(names.includes("list_windows"), "legacy beta authority is preserved; account-paired consent remains separate");
 });

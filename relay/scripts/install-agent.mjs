@@ -55,6 +55,7 @@ Values (flag, else environment variable, else default):
   --commander-remote-dir <dir>  ASTRA_COMMANDER_REMOTE_DIR (optional)
   --agent-key-file <path>       ASTRA_AGENT_KEY_FILE (default: <astra home>/agent-private.pem)
   --astra-home <dir>            ASTRA_HOME (default: ~/.astra-bridge; keys and agent logs)
+  --account-control-state <path> ASTRA_ACCOUNT_CONTROL_STATE_FILE (account-paired mode only)
   --help                        show this help
 `;
 
@@ -69,6 +70,7 @@ const VALUE_FLAGS = {
   "--commander-entry": "commanderEntry",
   "--commander-remote-dir": "commanderRemoteDir",
   "--agent-key-file": "agentKeyFile",
+  "--account-control-state": "accountControlStateFile",
   "--astra-home": "astraHome",
 };
 
@@ -157,7 +159,10 @@ export function resolveValues(flags, env = process.env, home = os.homedir()) {
   const commanderRemoteDir = commanderRemoteDirRaw ? abs(commanderRemoteDirRaw) : undefined;
   const agentKeyFile = abs(pick("agentKeyFile", "ASTRA_AGENT_KEY_FILE") ?? path.join(astraHome, "agent-private.pem"));
 
+  const stateFileRaw = pick("accountControlStateFile", "ASTRA_ACCOUNT_CONTROL_STATE_FILE");
+  const accountControlStateFile = stateFileRaw ? abs(stateFileRaw) : undefined;
   const plain = { relayUrl, relayHost, deviceId, astraHome, nodePath, agentPath, commanderEntry, agentKeyFile };
+  if (accountControlStateFile) plain.accountControlStateFile = accountControlStateFile;
   if (commanderRemoteDir) plain.commanderRemoteDir = commanderRemoteDir;
   for (const [name, value] of Object.entries(plain)) assertPlainValue(name, value);
 
@@ -168,6 +173,7 @@ export function resolveValues(flags, env = process.env, home = os.homedir()) {
     ASTRA_DEVICE_ID: deviceId,
     ASTRA_COMMANDER_ENTRY: commanderEntry,
     ASTRA_AGENT_KEY_FILE: agentKeyFile,
+    ...(accountControlStateFile ? { ASTRA_ACCOUNT_CONTROL_STATE_FILE: accountControlStateFile } : {}),
     ...(commanderRemoteDir ? { ASTRA_COMMANDER_REMOTE_DIR: commanderRemoteDir } : {}),
   };
   try {
@@ -220,6 +226,7 @@ export function resolveValues(flags, env = process.env, home = os.homedir()) {
   const optionalEnv = [["ASTRA_COMMANDER_ENTRY", commanderEntry]];
   if (commanderRemoteDir) optionalEnv.push(["ASTRA_COMMANDER_REMOTE_DIR", commanderRemoteDir]);
   if (agentKeyFile !== defaults.keyFile) optionalEnv.push(["ASTRA_AGENT_KEY_FILE", agentKeyFile]);
+  if (accountControlStateFile) optionalEnv.push(["ASTRA_ACCOUNT_CONTROL_STATE_FILE", accountControlStateFile]);
 
   return {
     values: {

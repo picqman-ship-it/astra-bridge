@@ -71,7 +71,7 @@ test("one-time pairing stores only the secret hash, claims one file-only Mac, an
 
   assert.deepEqual(
     await resolveAccessIdentityDevice(registry, identity.issuer, identity.subject),
-    { ownerId: claimed.ownerId, deviceId: DEVICE, terminalEnabled: false },
+    { ownerId: claimed.ownerId, deviceId: DEVICE, terminalEnabled: false, guiEnabled: false },
   );
   assert.deepEqual(await pairingStatus(registry, session.secret, NOW + 3), { status: "claimed", deviceId: DEVICE });
 

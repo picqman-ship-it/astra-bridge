@@ -272,7 +272,7 @@ test("authenticateAccessRequest can route a verified identity to its registered 
     keys,
     async (identity) => {
       seen.push(identity);
-      return { ownerId: "user-01", deviceId: DYNAMIC_DEVICE, terminalEnabled: false };
+      return { ownerId: "user-01", deviceId: DYNAMIC_DEVICE, terminalEnabled: false, guiEnabled: false };
     },
   );
   assert.deepEqual(seen, [{
@@ -343,6 +343,7 @@ test("Access registry routing sends a verified user only to its registered Mac",
       owner_id: "user-01",
       device_id: DYNAMIC_DEVICE,
       terminal_enabled: 1,
+      gui_enabled: 0,
     }),
     run: async () => ({ success: true }),
   };

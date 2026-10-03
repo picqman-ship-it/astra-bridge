@@ -53,7 +53,7 @@ test("all eight small-order points, sign aliases and all y >= p encodings are re
 
 test("beta authenticator never reads personal bearer, device or OAuth credentials", async () => {
   let reads = 0;
-  const env = { BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: { prepare() { reads++; return { bind() { return this; }, async first() { return { owner_id: "tester", device_id: id, terminal_enabled: 0 }; } }; } } };
+  const env = { BETA_REGISTRY_ENABLED: "true", BETA_REGISTRY: { prepare() { reads++; return { bind() { return this; }, async first() { return { owner_id: "tester", device_id: id, terminal_enabled: 0, gui_enabled: 0 }; } }; } } };
   for (const name of ["MCP_BEARER_TOKEN", "MCP_DEVICE_ID", "OAUTH_OWNER_SECRET"]) Object.defineProperty(env, name, { get() { assert.fail(`read personal ${name}`); } });
   const request = new Request(ORIGIN + "/beta/mcp", { headers: { authorization: "Bearer " + "synthetic-personal-looking-token".repeat(2) } });
   const principal = await authenticateBetaMcpRequest(request, env);

@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign } from "node:crypto";
+import { createAccountControlPolicy } from "./account-control-policy.mjs";
 import WebSocket from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -47,11 +48,18 @@ const MCP_PING_TIMEOUT_MS = 8_000;
 const TOOL_CALL_TIMEOUT_MS = 28_000;
 
 const privateKey = createPrivateKey(fs.readFileSync(keyFile));
+const accountControls = createAccountControlPolicy({
+  stateFile: config.accountControlStateFile, commanderRemoteDir: config.commanderRemoteDir,
+  deviceId, relayOrigin: relayBase.origin,
+  agentPublicKeyB64: createPublicKey(privateKey).export({ type: "spki", format: "der" }).toString("base64"),
+});
 // Computed once at startup so a bad value stops the agent here with a clear error. The key's
 // real path is protected too, in case the configured file is a symlink to another directory.
 const COMMANDER_ENV = commanderEnv(getDefaultEnvironment(), AGENT_CODE_DIR, {
   existing: process.env[PROTECTED_PATHS_ENV],
-  keyFiles: [keyFile, fs.realpathSync(keyFile)],
+  keyFiles: [keyFile, fs.realpathSync(keyFile), ...(config.accountControlStateFile
+    ? [config.accountControlStateFile, ...(fs.existsSync(config.accountControlStateFile)
+      ? [fs.realpathSync(config.accountControlStateFile)] : [])] : [])],
   homedir: os.homedir(),
 });
 let logChecks = 0;
@@ -95,17 +103,23 @@ const gate = new ConcurrencyGate(MAX_CONCURRENT);
 
 async function execute(payload) {
   if (payload?.action === "tools/list") {
-    return await mcp.run((client) => client.listTools(undefined, { timeout: TOOL_CALL_TIMEOUT_MS }));
+    const result = await mcp.run((client) => client.listTools(undefined, { timeout: TOOL_CALL_TIMEOUT_MS }));
+    return accountControls.filterTools(result);
   }
   if (payload?.action === "tools/call") {
     if (typeof payload.name !== "string" || !payload.name) {
       throw new Error("tool_name_required");
     }
-    return await mcp.run((client) => client.callTool(
-      { name: payload.name, arguments: payload.arguments ?? {} },
-      undefined,
-      { timeout: TOOL_CALL_TIMEOUT_MS },
-    ));
+    return await mcp.run((client) => {
+      // Check after the child is ready, immediately before dispatch. A pending
+      // or incomplete local review must never resume control after a reboot.
+      if (!accountControls.allows(payload.name)) throw new Error("account_control_unverified");
+      return client.callTool(
+        { name: payload.name, arguments: payload.arguments ?? {} },
+        undefined,
+        { timeout: TOOL_CALL_TIMEOUT_MS },
+      );
+    });
   }
   throw new Error("unsupported_action");
 }

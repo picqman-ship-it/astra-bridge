@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { createContext } from "./lib/context.mjs";
 import { doctor, printDoctor } from "./lib/doctor.mjs";
 import { install } from "./lib/install.mjs";
+import { changeAccountPermissions } from "./lib/account-control.mjs";
+import { readState } from "./lib/state.mjs";
 import { createUi } from "./lib/ui.mjs";
 import { uninstall } from "./lib/uninstall.mjs";
 import { Checkpoint, EXIT, InstallerError } from "./lib/util.mjs";
@@ -20,6 +22,8 @@ Usage:
                                            read-only health check (exit 1 on failures)
   ./install-macos.sh uninstall [--purge] [--dry-run] [--yes]
                                            stop and remove the agent; --purge also deletes keys
+  ./install-macos.sh permissions <change> [--yes]
+                                           change terminal/GUI permissions after account pairing
 
 Install options:
   --workspace <dir>         folder the AI may use (default ~/remote-workspace)
@@ -47,6 +51,13 @@ Install options:
   --yes, -y                 accept confirmations (never enables terminal/GUI by itself)
   --non-interactive         never prompt; missing answers stop at a checkpoint
 
+Permission changes (account-paired Macs only):
+  --enable-terminal         request terminal/process/job tools (interactive typed confirmation)
+  --disable-terminal        remove terminal/process/job tools
+  --enable-gui              request app-window tools; Accessibility must already be granted
+  --disable-gui             remove app-window tools
+  --file-only               remove both terminal and GUI tools
+
 Exit codes: 0 done, 1 failed, 2 usage error, 3 checkpoint (an action for you; re-run afterwards).
 `;
 
@@ -67,7 +78,9 @@ const BOOL_FLAGS = {
   "--beta-enroll": "betaEnroll",
   "--account-pair": "accountPair",
   "--enable-terminal": "enableTerminal",
+  "--disable-terminal": "disableTerminal",
   "--enable-gui": "enableGui",
+  "--disable-gui": "disableGui",
   "--file-only": "fileOnly",
   "--reconfigure": "reconfigure",
   "--redeploy": "redeploy",
@@ -89,6 +102,7 @@ const ALLOWED = {
   install: new Set([...Object.values(VALUE_FLAGS), "betaEnroll", "accountPair", "legacyInvite", "resetPendingIdentity", "enableTerminal", "enableGui", "fileOnly", "reconfigure", "redeploy", "replaceExistingWorker", "skipDeps", "skipCloudflare", "noNetworkChecks", "yes", "nonInteractive", "help"]),
   doctor: new Set(["noNetworkChecks", "json", "help", "nonInteractive"]),
   uninstall: new Set(["purge", "dryRun", "yes", "nonInteractive", "help"]),
+  permissions: new Set(["enableTerminal", "disableTerminal", "enableGui", "disableGui", "fileOnly", "yes", "nonInteractive", "help"]),
 };
 
 export class UsageError extends Error {}
@@ -131,7 +145,12 @@ export function parseArgs(argv) {
       throw new UsageError(`${flag} does not apply to "${command}"`);
     }
   }
-  if (opts.fileOnly && (opts.enableTerminal || opts.enableGui)) throw new UsageError("--file-only cannot be combined with --enable-terminal / --enable-gui");
+  if (opts.fileOnly && (opts.enableTerminal || opts.disableTerminal || opts.enableGui || opts.disableGui)) throw new UsageError("--file-only cannot be combined with individual permission flags");
+  if (opts.enableTerminal && opts.disableTerminal) throw new UsageError("--enable-terminal and --disable-terminal are contradictory");
+  if (opts.enableGui && opts.disableGui) throw new UsageError("--enable-gui and --disable-gui are contradictory");
+  if (command === "permissions" && !opts.help && !opts.fileOnly && !opts.enableTerminal && !opts.disableTerminal && !opts.enableGui && !opts.disableGui) {
+    throw new UsageError("permissions needs at least one explicit permission change");
+  }
   if (opts.betaEnroll && opts.accountPair) throw new UsageError("--beta-enroll and --account-pair are separate enrollment modes");
   if (opts.accountPair && (opts.inviteFile || opts.legacyInvite || opts.resetPendingIdentity)) {
     throw new UsageError("--account-pair cannot use beta invite/recovery options");
@@ -184,6 +203,13 @@ export async function main(argv = process.argv.slice(2)) {
     if (command === "uninstall") {
       await uninstall(ctx, { purge: Boolean(opts.purge), dryRun: Boolean(opts.dryRun) }, ui);
       return EXIT.OK;
+    }
+    if (command === "permissions") {
+      await changeAccountPermissions(ctx, opts, ui);
+      return EXIT.OK;
+    }
+    if (readState(ctx).accountControl?.pending) {
+      throw new InstallerError("an interrupted permission change is unverified; run ./install-macos.sh permissions --file-only before restarting setup");
     }
     await install(ctx, opts, ui);
     return EXIT.OK;

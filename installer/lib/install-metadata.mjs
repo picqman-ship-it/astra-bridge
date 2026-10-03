@@ -121,9 +121,12 @@ export async function installedPaths(ctx, plistFile, { read = readPlist } = {}) 
     || (env.ASTRA_AGENT_KEY_FILE ?? path.join(ctx.home, ".astra-bridge", "agent-private.pem")) !== path.join(astraHome, "agent-private.pem")
     || plist.StandardOutPath !== path.join(astraHome, "agent.stdout.log")
     || plist.StandardErrorPath !== path.join(astraHome, "agent.stderr.log")) fail("plist identity or key/log paths mismatch");
+  if (env.ASTRA_ACCOUNT_CONTROL_STATE_FILE !== undefined
+    && env.ASTRA_ACCOUNT_CONTROL_STATE_FILE !== path.join(astraHome, "install-state.json")) fail("account control state path mismatch");
   const optionalEnv = [["ASTRA_COMMANDER_ENTRY", ctx.commanderEntry]];
   if (env.ASTRA_COMMANDER_REMOTE_DIR) optionalEnv.push(["ASTRA_COMMANDER_REMOTE_DIR", remoteDir]);
   if (env.ASTRA_AGENT_KEY_FILE) optionalEnv.push(["ASTRA_AGENT_KEY_FILE", env.ASTRA_AGENT_KEY_FILE]);
+  if (env.ASTRA_ACCOUNT_CONTROL_STATE_FILE) optionalEnv.push(["ASTRA_ACCOUNT_CONTROL_STATE_FILE", env.ASTRA_ACCOUNT_CONTROL_STATE_FILE]);
   const expected = renderPlist(template.text, { NODE: plist.ProgramArguments[0], AGENT_PATH: ctx.agentPath,
     WORKING_DIR: ctx.relayDir, RELAY_URL: env.ASTRA_RELAY_URL, RELAY_HOST: env.ASTRA_RELAY_HOST,
     DEVICE_ID: env.ASTRA_DEVICE_ID, LOG_DIR: astraHome, optionalEnv });

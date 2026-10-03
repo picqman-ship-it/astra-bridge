@@ -16,13 +16,19 @@ const now = 1800000000000;
 const keys = generateKeyPairSync("ed25519");
 const publicKey = keys.publicKey.export({ type: "spki", format: "der" }).toString("base64");
 const registration = (invite, label) => signEnrollment(ORIGIN, invite, betaId(label), publicKey, keys.privateKey);
-// D1 exec accepts one statement per line. Retain EVERY statement from each whole
-// known migration/operator artifact, changing only comments/line formatting.
-const execArtifact = (db, sql) => db.exec(sql.replace(/--[^\n]*/g, "").replace(/\s*\n\s*/g, " ").replace(/;\s*/g, ";\n").trim());
-const MIGRATIONS = ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql"];
+// Keep each complete CREATE TRIGGER statement together, including its internal
+// semicolons. All migration bytes execute; no statements are selected/omitted.
+function artifactStatements(sql) {
+  const stripped = sql.replace(/--[^\n]*/g, "").trim();
+  return stripped.match(/\s*CREATE\s+TRIGGER\b[\s\S]*?\n\s*END\s*;|[^;]+(?:;|$)/gi)
+    ?.map(statement => statement.trim()).filter(Boolean) ?? [];
+}
+async function execArtifact(db, sql) {
+  for (const statement of artifactStatements(sql)) await db.prepare(statement).run();
+}
+const MIGRATIONS = ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql", "0008_control_permissions.sql"];
 async function applyMigration(db, name) {
-  const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
-  for (const statement of sql.split(";").filter(s => s.trim())) await db.prepare(statement).run();
+  await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
 }
 async function fixture(t, { migrations = MIGRATIONS } = {}) {
   const bundle = await build({ stdin: {
@@ -114,6 +120,7 @@ test("local D1 Access identity resolves exactly one active owned device and fail
     ownerId: "tester",
     deviceId,
     terminalEnabled: false,
+    guiEnabled: false,
   });
 
   const secondId = betaId("access-route-2");
@@ -128,6 +135,7 @@ test("local D1 Access identity resolves exactly one active owned device and fail
     ownerId: "tester",
     deviceId,
     terminalEnabled: false,
+    guiEnabled: false,
   });
 
   await db.prepare("UPDATE user_identities SET status = 'disabled' WHERE issuer = ? AND subject = ?").bind(issuer, subject).run();
@@ -180,7 +188,7 @@ test("bundled Worker + migrated D1 + native local rate bindings: enroll/status/c
   t.after(() => mf.dispose());
   const db = await mf.getD1Database("BETA_REGISTRY");
   // Whole migration/operator artifacts go through D1 exec; no statement picking.
-  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql"]) {
+  for (const name of ["0001_closed_beta_registry.sql", "0002_beta_enrollment_invites.sql", "0003_beta_agent_key_unique.sql", "0004_access_identities.sql", "0005_pairing_sessions.sql", "0006_pairing_claim_marker.sql", "0007_pairing_consent.sql", "0008_control_permissions.sql"]) {
     await execArtifact(db, fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   await db.exec("INSERT INTO users VALUES ('tester', 'Tester', 'active', '2026-01-01');");
@@ -329,6 +337,7 @@ test("D1 migration 0007 upgrades a populated 0006 registry without rewriting acc
   const alice = { issuer, subject: "alice", email: "alice@example.com" };
   assert.equal(await pairingPreview(db, legacyToken, alice, now), null, "legacy poll secret is not a browser code");
   assert.equal((await pairingStatus(db, legacyToken, now)).status, "pending", "legacy installer still sees its own session");
+  await applyMigration(db, "0008_control_permissions.sql");
   assert.equal((await resolveAccessIdentityDevice(db, issuer, "tester-subject")).deviceId, legacyDevice);
   const fresh = generateKeyPairSync("ed25519");
   const freshPub = fresh.publicKey.export({ type: "spki", format: "der" }).toString("base64");
@@ -337,6 +346,41 @@ test("D1 migration 0007 upgrades a populated 0006 registry without rewriting acc
   const review = await pairingPreview(db, session.claimCode, alice, now);
   assert.ok(await claimPairingSession(db, review.consent, alice, now + 1));
   assert.equal((await resolveAccessIdentityDevice(db, issuer, "alice")).deviceId, betaId("post-upgrade"));
+});
+
+test("D1 migration 0008 preserves populated 0007 state and enables independent terminal/GUI grants", { timeout: 60000 }, async t => {
+  const { db } = await fixture(t, { migrations: MIGRATIONS.slice(0, 7) });
+  const { startControlPermissionRequest, applyControlPermissionRequest, resolveControlDeviceState } = await import("../.test-tmp/control-permissions.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const issuer = "https://control-upgrade.cloudflareaccess.com";
+  const subject = "control-upgrade-subject";
+  const deviceId = betaId("control-upgrade");
+  await db.prepare("INSERT INTO devices VALUES (?, 'tester', ?, 'active', 1, '2026-01-01', NULL)").bind(deviceId, publicKey).run();
+  await db.prepare("INSERT INTO user_identities (issuer,subject,owner_id,email,status,created_at) VALUES (?,?,'tester','upgrade@example.com','active','2026-01-01')")
+    .bind(issuer, subject).run();
+  const devicesBefore = (await db.prepare("SELECT * FROM devices ORDER BY device_id").all()).results;
+  const identitiesBefore = (await db.prepare("SELECT * FROM user_identities ORDER BY issuer,subject").all()).results;
+
+  await applyMigration(db, "0008_control_permissions.sql");
+  assert.deepEqual((await db.prepare("SELECT * FROM devices ORDER BY device_id").all()).results, devicesBefore);
+  assert.deepEqual((await db.prepare("SELECT * FROM user_identities ORDER BY issuer,subject").all()).results, identitiesBefore);
+  assert.equal((await db.prepare("SELECT count(*) n FROM device_control_permissions").first()).n, 0);
+  assert.equal((await db.prepare("SELECT count(*) n FROM control_permission_requests").first()).n, 0);
+  assert.deepEqual(await resolveAccessIdentityDevice(db, issuer, subject), {
+    ownerId: "tester", deviceId, terminalEnabled: true, guiEnabled: false,
+  }, "legacy terminal bit remains the fallback until a permission row exists");
+
+  const state = await resolveControlDeviceState(db, deviceId);
+  assert.equal(state.terminalEnabled, true);
+  assert.equal(state.guiEnabled, false);
+  const requestId = randomUUID();
+  const target = { terminalEnabled: false, guiEnabled: true };
+  assert.ok(await startControlPermissionRequest(db, deviceId, publicKey, requestId, target, now));
+  const applied = await applyControlPermissionRequest(db, deviceId, publicKey, requestId, target, now + 1);
+  assert.deepEqual({ terminalEnabled: applied.terminalEnabled, guiEnabled: applied.guiEnabled }, target);
+  assert.deepEqual(await resolveAccessIdentityDevice(db, issuer, subject), {
+    ownerId: "tester", deviceId, terminalEnabled: false, guiEnabled: true,
+  });
 });
 
 test("D1 pairing: failed identity insert rolls back the account row; non-file scope cannot be stored", { timeout: 60000 }, async t => {
@@ -384,7 +428,7 @@ test("bundled Worker in workerd: account pairing consent routes Access MCP to th
   const env = {
     BETA_REGISTRY: { type: "d1", id: "pairing-e2e" },
     DEVICE_RELAY: { type: "durable-object", worker: "pairing-e2e", exportName: "DeviceRelay" },
-    ...Object.fromEntries(Object.entries({ BETA_REGISTRY_ENABLED: "true", PAIRING_ENABLED: "true", MCP_AUTH_MODE: "access",
+    ...Object.fromEntries(Object.entries({ BETA_REGISTRY_ENABLED: "true", PAIRING_ENABLED: "true", CONTROL_PERMISSIONS_ENABLED: "true", MCP_AUTH_MODE: "access",
       ACCESS_DEVICE_ROUTING: "registry", TEAM_DOMAIN: team, POLICY_AUD: aud,
       AGENT_DEVICE_ID: "personal", CLIENT_DEVICE_ID: "personal", MCP_DEVICE_ID: "personal" }).map(([name, value]) => [name, { type: "text", value }])),
     ...Object.fromEntries(example.ratelimits.map(binding => [binding.name, { type: "rate-limit", namespace: binding.namespace_id, simple: binding.simple }])),
@@ -448,11 +492,19 @@ test("bundled Worker in workerd: account pairing consent routes Access MCP to th
   assert.equal(connected.status, 101);
   const ws = connected.webSocket; assert.ok(ws); ws.accept(); t.after(() => { try { ws.close(); } catch {} });
   const rpcs = [];
+  const downstreamTools = [
+    { name: "read_file", description: "read", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+    { name: "start_process", description: "terminal", inputSchema: { type: "object", properties: { command: { type: "string" }, idempotencyKey: { type: "string" } } } },
+    { name: "list_windows", description: "gui", inputSchema: { type: "object", properties: {} } },
+  ];
   ws.addEventListener("message", event => {
     const frame = JSON.parse(event.data);
     if (frame.type === "rpc") {
       rpcs.push(frame);
-      ws.send(JSON.stringify({ type: "rpc_result", id: frame.id, result: { content: [{ type: "text", text: "synthetic paired-mac result" }] } }));
+      const result = frame.payload?.action === "tools/list"
+        ? { tools: downstreamTools }
+        : { content: [{ type: "text", text: `synthetic paired-mac result:${frame.payload?.name ?? "unknown"}` }] };
+      ws.send(JSON.stringify({ type: "rpc_result", id: frame.id, result }));
     }
   });
   const heartbeat = new Promise(resolve => ws.addEventListener("message", event => {
@@ -469,13 +521,93 @@ test("bundled Worker in workerd: account pairing consent routes Access MCP to th
   const denied = await mcp({ id: 2, method: "tools/call", params: { name: "start_process", arguments: { command: "true", idempotencyKey: "pairing-e2e-denied" } } });
   assert.equal((await denied.json()).result.isError, true);
   assert.equal(rpcs.length, 1, "terminal tool never reaches a file-only Mac");
-  assert.equal((await mcp({ id: 3, method: "tools/list", params: {} }, await assertion("mallory-subject"))).status, 401,
+
+  const control = async (action, target, requestId = randomUUID()) => {
+    const path = `/control/device/${deviceId}/${action}`;
+    const body = Buffer.from(JSON.stringify({ version: 1, requestId, ...target }));
+    return send(path, mac, { method: "POST", headers: { ...signedHeaders(keys.privateKey, "POST", path, body), "content-type": "application/json" }, body });
+  };
+  const controlStatusPath = `/control/device/${deviceId}/status`;
+  const getControlStatus = () => send(controlStatusPath, mac, { headers: signedHeaders(keys.privateKey, "GET", controlStatusPath) });
+  assert.equal((await send(controlStatusPath, authed)).status, 401, "an authenticated browser cannot request Mac control");
+  const applyTarget = async target => {
+    const current = await (await getControlStatus()).json();
+    assert.equal(current.agentFingerprint, createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("hex"));
+    const requestId = randomUUID();
+    const started = await control("start", target, requestId);
+    assert.equal(started.status, 201);
+    const preview = await started.json();
+    assert.equal(preview.agentFingerprint, current.agentFingerprint, "installer verifies this exact Mac fingerprint");
+    assert.equal(preview.identityFingerprint, current.identityFingerprint, "installer verifies this exact account fingerprint");
+    assert.equal(preview.accountEmail, current.accountEmail);
+    const applied = await control("apply", target, requestId);
+    assert.equal(applied.status, 200);
+    const appliedBody = await applied.json();
+    assert.deepEqual({ terminalEnabled: appliedBody.terminalEnabled, guiEnabled: appliedBody.guiEnabled }, target);
+  };
+  const listedNames = async id => {
+    const listed = await mcp({ id, method: "tools/list", params: {} });
+    assert.equal(listed.status, 200);
+    return (await listed.json()).result.tools.map(tool => tool.name);
+  };
+
+  await applyTarget({ terminalEnabled: true, guiEnabled: false });
+  let names = await listedNames(3);
+  assert.ok(names.includes("start_process")); assert.ok(!names.includes("list_windows"));
+  const terminalCall = await mcp({ id: 4, method: "tools/call", params: { name: "start_process", arguments: { command: "true", idempotencyKey: "pairing-e2e-terminal" } } });
+  assert.ok((await terminalCall.text()).includes("synthetic paired-mac result:start_process"));
+
+  await applyTarget({ terminalEnabled: false, guiEnabled: false });
+  names = await listedNames(5);
+  assert.ok(!names.includes("start_process") && !names.includes("list_windows"));
+  await applyTarget({ terminalEnabled: false, guiEnabled: true });
+  names = await listedNames(6);
+  assert.ok(!names.includes("start_process")); assert.ok(names.includes("list_windows"));
+  const guiCall = await mcp({ id: 7, method: "tools/call", params: { name: "list_windows", arguments: {} } });
+  assert.ok((await guiCall.text()).includes("synthetic paired-mac result:list_windows"));
+
+  assert.equal((await mcp({ id: 8, method: "tools/list", params: {} }, await assertion("mallory-subject"))).status, 401,
     "same email, different verified subject has no route");
 
+  const rpcsBeforeRevoke = rpcs.length;
   for (const sql of revokeDevice({ ownerId: device.owner_id, deviceId }).split(";").filter(s => s.trim())) await db.prepare(sql).run();
-  assert.equal((await mcp({ id: 4, method: "tools/list", params: {} })).status, 401);
+  assert.equal((await mcp({ id: 9, method: "tools/list", params: {} })).status, 401);
   assert.deepEqual(await (await pairStatus()).json(), { status: "cancelled", deviceId });
   assert.equal((await signedStatus()).status, 403);
-  assert.equal(rpcs.length, 1);
+  assert.equal(rpcs.length, rpcsBeforeRevoke, "revocation prevents any further relay traffic to the Mac");
   assert.ok(outbound.length >= 1 && outbound.every(url => url === `${team}/cdn-cgi/access/certs`), outbound.join(","));
 });
+
+
+for (const mode of ["cancel", "expiry", "identity-revoke", "identity-ambiguity", "permission-aba", "ignored-update"]) {
+  test(`real D1 control ${mode} race cannot commit permission or applied consent`, { timeout: 60000 }, async t => {
+    const { db } = await fixture(t);
+    const { startControlPermissionRequest, applyControlPermissionRequest } = await import("../.test-tmp/control-permissions.mjs");
+    const { randomUUID } = await import("node:crypto");
+    const deviceId = betaId(`control-race-${mode}`);
+    const issuer = "https://control-races.cloudflareaccess.com";
+    await db.prepare("INSERT INTO devices VALUES (?, 'tester', ?, 'active', 0, '2026-01-01', NULL)").bind(deviceId, publicKey).run();
+    await db.prepare("INSERT INTO user_identities (issuer,subject,owner_id,email,status,created_at) VALUES (?,'control-subject','tester','control@example.com','active','2026-01-01')").bind(issuer).run();
+    const requestId = randomUUID();
+    const target = { terminalEnabled: true, guiEnabled: false };
+    assert.ok(await startControlPermissionRequest(db, deviceId, publicKey, requestId, target, now));
+    const racedRegistry = {
+      prepare: sql => db.prepare(sql),
+      batch: async statements => {
+        if (mode === "cancel") await db.prepare("UPDATE control_permission_requests SET status='cancelled' WHERE request_id=?").bind(requestId).run();
+        if (mode === "expiry") await db.prepare("UPDATE control_permission_requests SET expires_at_ms=? WHERE request_id=?").bind(now + 1, requestId).run();
+        if (mode === "identity-revoke") await db.prepare("UPDATE user_identities SET status='revoked' WHERE issuer=?").bind(issuer).run();
+        if (mode === "identity-ambiguity") await db.prepare("INSERT INTO user_identities (issuer,subject,owner_id,email,status,created_at) VALUES (?,'another-subject','tester','other@example.com','active','2026-01-01')").bind(issuer).run();
+        if (mode === "permission-aba") await db.prepare("UPDATE device_control_permissions SET version=version+2 WHERE device_id=?").bind(deviceId).run();
+        if (mode === "ignored-update") await db.prepare("CREATE TRIGGER ignore_control BEFORE UPDATE ON device_control_permissions BEGIN SELECT RAISE(IGNORE); END").run();
+        return db.batch(statements);
+      },
+    };
+    assert.equal(await applyControlPermissionRequest(racedRegistry, deviceId, publicKey, requestId, target, now + 1), null);
+    const permission = await db.prepare("SELECT terminal_enabled,gui_enabled FROM device_control_permissions WHERE device_id=?").bind(deviceId).first();
+    assert.deepEqual(permission, { terminal_enabled: 0, gui_enabled: 0 });
+    const request = await db.prepare("SELECT status,applied_at_ms FROM control_permission_requests WHERE request_id=?").bind(requestId).first();
+    assert.equal(request.status, mode === "cancel" ? "cancelled" : "pending");
+    assert.equal(request.applied_at_ms, null, "failed permission mutation must roll back applied consent too");
+  });
+}

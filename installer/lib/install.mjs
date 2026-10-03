@@ -520,6 +520,7 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
   const node = stableNodePath(ctx.execPath, { pathEnv: ctx.env.PATH ?? "" });
   const { readTemplate, renderPlist, resolveValues } = await import(pathToFileURL(ctx.installAgent).href);
   const flags = { relayUrl, deviceId, node: node.path };
+  if (opts.accountPair) flags.accountControlStateFile = ctx.stateFile;
   if (ctx.customAstraHome) flags.astraHome = ctx.astraHome;
   if (ctx.customRemoteDir) flags.commanderRemoteDir = ctx.commanderRemoteDir;
   const { text: template, label } = readTemplate();
@@ -583,6 +584,7 @@ export async function agent(ctx, opts, ui, s, { probeStatus = probeAgentStatus, 
       const args = [ctx.installAgent, "--install", "--relay-url", relayUrl, "--device-id", deviceId, "--node", node.path];
       if (flags.astraHome) args.push("--astra-home", flags.astraHome);
       if (flags.commanderRemoteDir) args.push("--commander-remote-dir", flags.commanderRemoteDir);
+      if (flags.accountControlStateFile) args.push("--account-control-state", flags.accountControlStateFile);
       if (current !== null) args.push("--force");
       const r = run(ctx.execPath, args, { env: stripAstraEnv(ctx.childEnv) });
       if (r.status !== 0) throw new InstallerError(`install-agent refused: ${tail(r.stderr, 6)}`);
@@ -833,7 +835,7 @@ export async function install(ctx, opts, ui) {
     ui.heading("Astra account pairing complete");
     ui.ok("this Mac is connected to your Astra account; file-only mode verified");
     ui.info("Next: install/select the Astra plugin in ChatGPT. The plugin will route your authenticated ChatGPT session to this Mac automatically.");
-    ui.info("Terminal and GUI control remain disabled until a separate explicit permission elevation is implemented and approved.");
+    ui.info("Terminal and GUI control remain disabled until you separately review permissions --enable-terminal or permissions --enable-gui on this Mac.");
     return;
   }
   await personalConfig(ctx, opts, ui, s);
