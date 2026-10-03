@@ -348,11 +348,97 @@
   },
   "migration_history_0001_to_0007": "byte-identical to base",
   "local_code_status": "PASS",
-  "packaged_source_status": "PENDING",
-  "exact_commit_ci_status": "PENDING",
+  "packaged_source_status": "PASS",
   "deployed": false,
   "real_mac_permissions_changed": false,
   "fresh_account_chatgpt_iphone_acceptance": "NOT_RUN",
   "voice_acceptance": "NOT_RUN",
-  "plugin_publication": "NOT_DONE"
+  "plugin_publication": "NOT_DONE",
+  "checkpoint_updated_at_utc": "2026-10-03T12:02:42.061679+00:00",
+  "tested_implementation_commit": "b79c557cb5a31b0d1ef9b55dbbf3dd60f676b414",
+  "packaged_source": {
+    "source_commit": "b79c557cb5a31b0d1ef9b55dbbf3dd60f676b414",
+    "started_at_utc": "2026-10-03T11:53:17.233796+00:00",
+    "gates": {
+      "build-a": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "bd547f890e0b713e0aa5a70d00d0f714941a7034ed43cb2274a9841956b6f0d1"
+      },
+      "build-b": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "bd547f890e0b713e0aa5a70d00d0f714941a7034ed43cb2274a9841956b6f0d1"
+      },
+      "ci-mcp-commander": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "88582e1ea10751651b9738fe522bfbb5fb40b673ec13654b5cf48ea8c2b33547"
+      },
+      "ci-relay": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "6ee2f46c703a0f3507c6945457492cc7d811411ca4024e9298ce8412ef53f391"
+      },
+      "archive-commander": {
+        "exit": 0,
+        "counts": {
+          "tests": 484,
+          "pass": 484,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "log_sha256": "f96878135ed920532d9958f919063639845a9bbb7d6d99d3c491d4ad7ffddb12"
+      },
+      "archive-commander-typecheck": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "0f0139931e0029613811517ccea06073fb8bc7a21d46f378239a6b5655e38715"
+      },
+      "archive-relay-typecheck": {
+        "exit": 0,
+        "counts": {},
+        "log_sha256": "c0abee758d34713824a6d171ac998d444b1231703ca09a539de63d79143dabc3"
+      },
+      "archive-relay": {
+        "exit": 0,
+        "counts": {
+          "tests": 315,
+          "pass": 315,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "log_sha256": "338f93d141390d7584226d24911fb97d2ed34534a32b9221e208f22336cbbf04"
+      },
+      "archive-installer": {
+        "exit": 0,
+        "counts": {
+          "tests": 183,
+          "pass": 182,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1,
+          "todo": 0
+        },
+        "log_sha256": "bf669523c1bca33305a09779e3968275d3ab82728d2c0a040a716aa00dce8952"
+      }
+    },
+    "artifact": {
+      "path": "/Users/eimosd/CommanderWorkspace/astra-finish-package-20261003-b79c557/a/astra-bridge-0.1.0-b79c557cb5a3.tar.gz",
+      "sha256": "b7031df82f770c211660e6ffac0223d8da24bde06a1c6a35927fa0f725a83a09",
+      "bytes": 696765,
+      "reproducible": true,
+      "signed": false,
+      "notarized": false
+    },
+    "extracted_root": "/Users/eimosd/CommanderWorkspace/astra-finish-package-20261003-b79c557/extracted/astra-bridge-0.1.0-b79c557cb5a3",
+    "finished_at_utc": "2026-10-03T12:00:38.823508+00:00",
+    "status": "PASS"
+  },
+  "exact_commit_ci_status_at_checkpoint_write": "PENDING_PUSH",
+  "published_verification_file_local": "/Users/eimosd/CommanderWorkspace/astra-mobile-beta2-fix-20261002/relay/.local-evidence/codex-finish-20261003/final-published-verification.json"
 }

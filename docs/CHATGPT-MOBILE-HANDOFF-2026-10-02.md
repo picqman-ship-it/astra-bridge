@@ -1,5 +1,7 @@
 # ChatGPT mobile → Astra Bridge → Mac: 2026-10-02 checkpoint
 
+Current separately consented control and packaged-source milestone: [2026-10-03 checkpoint](CHATGPT-MOBILE-HANDOFF-2026-10-03.md). Earlier counts/status below are historical.
+
 ## Credential-free claim and account-bound consent: verified local milestone
 
 This section supersedes the rollout status below; the earlier checkpoint and its evidence remain historical. Base: `7291ab39463059b2f1a5c5b6c5be6ccb0d81c8a6`; the remote feature branch was rechecked as unchanged before commit. Codex started this work and stopped at its usage limit. Its intermediate full-relay run (230 pass / 12 fail) failed only because its sandbox denied Miniflare's localhost listener. A separate session outside that sandbox then completed, re-audited and verified the work. Every count below comes from that session's final runs on the committed source.

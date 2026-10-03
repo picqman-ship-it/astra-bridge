@@ -1,5 +1,7 @@
 # ChatGPT Mobile / Voice → Astra Bridge → Mac
 
+Current separately consented control and packaged-source milestone: [2026-10-03 checkpoint](CHATGPT-MOBILE-HANDOFF-2026-10-03.md). Earlier counts/status below are historical.
+
 ## Product goal
 
 Astra Bridge's product goal is **normal ChatGPT chat on an iPhone → authenticated Astra integration → that user's Mac**. Voice is a separate acceptance target where the actual client/account supports it. Neither universal mobile/Voice availability nor public plugin approval is established by local tests.
