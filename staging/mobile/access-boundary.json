@@ -2,6 +2,20 @@
   "status": "review_checklist_not_cloudflare_api_payload",
   "application_name": "Astra Mobile Control Staging 2026-10-03",
   "identity_boundary": "One coherent Access application/AUD for browser claim and Managed OAuth MCP",
+  "implementation": {
+    "protected_application": "Hostname-based self-hosted application for the exact staging hostname, all paths, one AUD",
+    "public_exceptions": "Separate more-specific hostname/path applications with Bypass / Include Everyone, limited to the exact list below",
+    "never_bypass": ["/mcp", "/pair/claim", "/pair/*"],
+    "worker_level_access": false,
+    "account_wide_changes": false,
+    "preview_urls": false,
+    "official_references": [
+      "https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/",
+      "https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/#bypass-a-public-endpoint",
+      "https://developers.cloudflare.com/workers/configuration/cloudflare-access/",
+      "https://developers.cloudflare.com/workers/previews/custom-domains/"
+    ]
+  },
   "default": "Access-protected; only approved test identities",
   "must_remain_protected": ["/mcp", "/pair/claim"],
   "public_edge_exceptions": [

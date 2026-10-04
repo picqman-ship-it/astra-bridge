@@ -1,6 +1,6 @@
 {
   "prepared_on": "2026-10-04",
-  "status": "offline_preparation_only",
+  "status": "isolated_resources_created_astra_runtime_not_deployed",
   "source_commit": "b79c557cb5a31b0d1ef9b55dbbf3dd60f676b414",
   "feature_head": "08bb3fb4a558e4b154aeaabaa812c31b2d1f6999",
   "existing_ci": {
@@ -22,7 +22,36 @@
     "entries": 260,
     "result": "Names, modes, types, link targets and every regular-file SHA match canonical Mac archive; compressed bytes differ. This rebuild does not replace the canonical tested artifact."
   },
-  "not_executed": ["cloud_resource_creation", "live_migrations", "Access_changes", "deployment", "Mac_installation", "real_pairing", "iPhone_acceptance", "control_elevation", "publication"],
+  "isolated_resource_checkpoint": {
+    "account_selected_by_owner": true,
+    "private_resource_record": "Mac staging kit: provisioning/scope.local.json",
+    "d1": {"created": true, "region": "WEUR", "migrations_applied": false},
+    "placeholder_worker": {
+      "deployed": true,
+      "source_sha256": "3d320c12ab56e44c47225b7f071ab50c588ebfa85e5ec2f85d346f26c8c878a0",
+      "dry_run_exit": 0,
+      "bindings": 0,
+      "http_checks": {"paths": ["/mcp", "/pair/claim", "/pair/start", "/healthz"], "passed": 4, "failed": 0, "expected_status": 404, "cache_control": "no-store"},
+      "astra_runtime_deployed": false
+    },
+    "blockers": ["Access administration and dashboard sign-in verification", "Dedicated Mac user and live test identities not ready"],
+    "mac_connection_restored": true,
+    "derived_pinned_archive": {
+      "created": true,
+      "sha256": "a08e3c9321b698a65247ba0c4d98f698ea68691906fc50109f254feb0812849b",
+      "bytes": 708403,
+      "entries": 260,
+      "changed_files": ["installer/lib/beta-trust.mjs"],
+      "manifest_metadata_preserved": true,
+      "exact_origin_accepted_wrong_origin_denied": true,
+      "native_installer_gate": {"passed": 182, "failed": 0, "skipped": 1, "skip_reason": "not a git checkout", "cancelled": 0, "todo": 0},
+      "test_commands_exit": 0,
+      "initial_wrapper_parser_exit": 1,
+      "wrapper_note": "TAP-only parsing rejected Node spec output. Counts and expected skip were verified from the original log without changing or rerunning tests.",
+      "install_ready": false
+    }
+  },
+  "not_executed": ["live_migrations", "Access_changes", "astra_runtime_deployment", "Mac_installation", "real_pairing", "iPhone_acceptance", "control_elevation", "publication"],
   "test_results_for_preparation_tools": {
     "renderer_tests": {"passed": 6, "failed": 0, "skipped": 0},
     "wrangler_dry_run": {

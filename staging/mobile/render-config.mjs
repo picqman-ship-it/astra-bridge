@@ -43,6 +43,7 @@ export function makeConfig(input) {
   const t = validateTargets(input);
   return {
     account_id: t.account_id, name: t.worker_name, main: "src/index.ts", compatibility_date: "2026-09-27",
+    workers_dev: true, preview_urls: false,
     durable_objects: { bindings: [{ name: "DEVICE_RELAY", class_name: "DeviceRelay" }, { name: "OAUTH_STORE", class_name: "OAuthStore" }] },
     migrations: [{ tag: "v1", new_sqlite_classes: ["DeviceRelay"] }, { tag: "v2", new_sqlite_classes: ["OAuthStore"] }],
     d1_databases: [{ binding: "BETA_REGISTRY", database_name: t.database_name, database_id: t.database_id, migrations_dir: "migrations" }],

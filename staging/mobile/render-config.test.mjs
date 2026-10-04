@@ -35,6 +35,7 @@ test("accepts only canonical staging and Access origins", () => {
 test("config has isolated bindings, rate limits and file-only control boundaries", () => {
   const c = makeConfig(fixture());
   assert.equal(c.main, "src/index.ts"); assert.equal(c.d1_databases[0].binding, "BETA_REGISTRY"); assert.equal(c.d1_databases[0].migrations_dir, "migrations");
+  assert.equal(c.workers_dev, true); assert.equal(c.preview_urls, false);
   assert.deepEqual(c.migrations.map((m) => m.tag), ["v1", "v2"]);
   assert.deepEqual(c.ratelimits.map((r) => r.simple.limit), [5, 120, 1200, 60, 600, 6000]);
   assert.equal(c.vars.MCP_AUTH_MODE, "access"); assert.equal(c.vars.ACCESS_DEVICE_ROUTING, "registry"); assert.equal(c.vars.PAIRING_ENABLED, "true");

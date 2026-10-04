@@ -1,6 +1,6 @@
 # Mobile staging deployment kit
 
-Prepared 2026-10-04. **Offline preparation; nothing deployed or installed.**
+Prepared 2026-10-04. **Isolated D1 and an inert placeholder Worker created; Astra runtime and installation still pending.** Current results are in [the checkpoint](HANDOFF-2026-10-04.md). Private target IDs remain outside this public kit.
 
 This kit reuses mobile source `b79c557cb5a31b0d1ef9b55dbbf3dd60f676b414` and feature evidence at `08bb3fb4a558e4b154aeaabaa812c31b2d1f6999`. It does not change the runtime. [Astra CI passed for the exact feature head](https://github.com/picqman-ship-it/astra-bridge/actions/runs/37121601306). Historical native/packaged gates are in [evidence.json](evidence.json); they are not live iPhone acceptance.
 
@@ -48,11 +48,13 @@ A Linux rebuild has identical source contents but a different archive SHA; it is
 After target selection, inspect only the chosen account's staging inventory and reuse an exact matching resource only if its identity and purpose are established. A name collision with an unknown resource stops the procedure. Use the source's locked Wrangler dependency; do not fall back to an implicit account or global installation.
 
 1. Create the named isolated D1 database. Record its returned ID/account/name in a private copy of `targets.example.json`.
-2. Reserve the named staging Worker and obtain its exact workers.dev origin. If a placeholder Worker is necessary to establish the hostname, it must return no tool service and contain no credentials or bindings; configure Access before deploying Astra.
-3. Create a separate Access application for that origin with the same coherent AUD for `/mcp` and `/pair/claim`, Managed OAuth enabled, and only selected test identities allowed. Follow [access-boundary.json](access-boundary.json) and the source [Access guide](../../relay/docs/ACCOUNT-PAIRING-ACCESS.md). Verify actual precedence of public exceptions; ordinary Access login alone does not establish MCP OAuth.
+2. Reserve the named staging Worker and obtain its exact workers.dev origin. If a placeholder Worker is necessary to establish the hostname, use `placeholder-worker.mjs` with a separate explicit config containing only the selected account, Worker name, entrypoint, compatibility date, `workers_dev: true` and `preview_urls: false`. It returns 404 for every request and contains no credentials or bindings. Dry-run and inspect that config before uploading; configure Access before deploying Astra.
+3. Create one hostname-based self-hosted Access application covering that exact origin and all paths. Keep `/mcp` and `/pair/claim` on its same coherent AUD, enable Managed OAuth and admit only selected test identities. Add separate, more-specific path applications with Bypass/Include Everyone only for the reviewed public exceptions in [access-boundary.json](access-boundary.json). These public applications do not replace the protected application's AUD. Never bypass `/pair/*` or add Everyone to the protected policy. Cloudflare documents this pattern in [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/) and [public endpoint bypass](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/#bypass-a-public-endpoint). Use the source [Access guide](../../relay/docs/ACCOUNT-PAIRING-ACCESS.md) for the relay identity contract. Verify actual precedence of public exceptions; ordinary Access login alone does not establish MCP OAuth.
 4. Confirm six unused positive rate namespaces. The example IDs are proposals, not allocations. Set `namespace_inventory_checked` only after recording that inventory check.
 
 These are cloud writes and must stay within the selected new resources. No live identity rows or credentials need to be exported.
+
+Do not use Worker-level Access or account-wide protection toggles: Cloudflare currently [documents a 403 limitation for WebSocket upgrades under Worker-level Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/), and Astra's agent needs WebSockets. Use the exact hostname/path applications instead. Keep `preview_urls: false` in both placeholder and Astra configs so an alternate preview hostname does not escape the reviewed boundary; [preview URL settings persist when omitted](https://developers.cloudflare.com/workers/previews/custom-domains/).
 
 ## 3. Render and inspect the concrete config
 
