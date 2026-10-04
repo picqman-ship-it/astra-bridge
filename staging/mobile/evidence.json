@@ -1,0 +1,36 @@
+{
+  "prepared_on": "2026-10-04",
+  "status": "offline_preparation_only",
+  "source_commit": "b79c557cb5a31b0d1ef9b55dbbf3dd60f676b414",
+  "feature_head": "08bb3fb4a558e4b154aeaabaa812c31b2d1f6999",
+  "existing_ci": {
+    "run_id": 37121601306,
+    "url": "https://github.com/picqman-ship-it/astra-bridge/actions/runs/37121601306",
+    "conclusion": "success",
+    "head_sha": "08bb3fb4a558e4b154aeaabaa812c31b2d1f6999"
+  },
+  "canonical_mac_archive": {
+    "filename": "astra-bridge-0.1.0-b79c557cb5a3.tar.gz",
+    "sha256": "b7031df82f770c211660e6ffac0223d8da24bde06a1c6a35927fa0f725a83a09",
+    "bytes": 696765,
+    "existing_packaged_tests": {"commander": "484 pass / 0 fail / 0 skip", "relay": "315 pass / 0 fail / 0 skip", "installer": "182 pass / 0 fail / 1 expected non-Git skip"},
+    "rechecked_2026_10_04": "Canonical Mac archive SHA-256 matches the recorded release-gate artifact"
+  },
+  "linux_rebuild_comparison": {
+    "sha256": "0bfd7bbaaefbb31c8e53887205558870294092290c916d8412811fa98082807b",
+    "content_manifest_sha256": "92cc68fb62432184b1bda418385006fad2f394b1673c1195c239318b8afed1d1",
+    "entries": 260,
+    "result": "Names, modes, types, link targets and every regular-file SHA match canonical Mac archive; compressed bytes differ. This rebuild does not replace the canonical tested artifact."
+  },
+  "not_executed": ["cloud_resource_creation", "live_migrations", "Access_changes", "deployment", "Mac_installation", "real_pairing", "iPhone_acceptance", "control_elevation", "publication"],
+  "test_results_for_preparation_tools": {
+    "renderer_tests": {"passed": 6, "failed": 0, "skipped": 0},
+    "wrangler_dry_run": {
+      "exit": 0,
+      "version": "4.142.0",
+      "scope": "Exact mobile source, synthetic target metadata, compile only; no upload or live identity/resource check",
+      "bundle_bytes_reported": "825.68 KiB / gzip 169.22 KiB"
+    },
+    "source_changes": "Preparation kit only; no runtime or source test changes"
+  }
+}

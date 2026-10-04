@@ -1,0 +1,13 @@
+{
+  "account_id": null,
+  "worker_name": "astra-mobile-control-staging-20261003",
+  "origin": null,
+  "database_name": "astra-mobile-control-staging-registry-20261003",
+  "database_id": null,
+  "access_application_id": null,
+  "team_domain": null,
+  "policy_aud": null,
+  "allowed_emails": [],
+  "rate_namespace_ids": ["2026100301", "2026100302", "2026100303", "2026100304", "2026100305", "2026100306"],
+  "namespace_inventory_checked": false
+}

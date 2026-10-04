@@ -1,0 +1,27 @@
+{
+  "status": "review_checklist_not_cloudflare_api_payload",
+  "application_name": "Astra Mobile Control Staging 2026-10-03",
+  "identity_boundary": "One coherent Access application/AUD for browser claim and Managed OAuth MCP",
+  "default": "Access-protected; only approved test identities",
+  "must_remain_protected": ["/mcp", "/pair/claim"],
+  "public_edge_exceptions": [
+    "/healthz",
+    "/.well-known/openai-apps-challenge",
+    "/v1/device/*",
+    "/beta/device/*/status",
+    "/beta/mcp",
+    "/beta/enroll",
+    "/pair/start",
+    "/pair/status",
+    "/control/device/*"
+  ],
+  "initial_disabled_services": ["invited_enrollment", "terminal_gui_permission_service"],
+  "logging": "No pairing codes, bearer tokens, cookies, keys, request bodies or HAR captures in evidence; verify actual provider logging settings",
+  "must_observe": [
+    "Managed OAuth discovery and authenticated MCP on actual ChatGPT iPhone client",
+    "Unauthenticated /mcp and /pair/claim denied at the edge",
+    "Only exact reviewed public paths bypass Access; device/pairing paths retain their route-specific Worker authentication and rate limits",
+    "Health and ownership-challenge routes are intentionally public; an unconfigured challenge and disabled enrollment/control services return their expected refusal/404",
+    "No owner installation/device/public key in staging configuration"
+  ]
+}
