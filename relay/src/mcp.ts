@@ -5,6 +5,8 @@ import {
   exposeApprovedTool,
   isToolApproved,
   OAUTH_SCOPES,
+  SCOPE_READ,
+  SCOPE_WRITE,
   requiredScope,
   type OAuthScope,
 } from "./tool-policy";
@@ -16,6 +18,7 @@ import {
   type D1DatabaseLike,
 } from "./beta-registry";
 import { equalSecret } from "./secrets";
+import { BodyTooLargeError, readBoundedBody } from "./bounded-body";
 
 export const MCP_PATH = "/mcp";
 export const MCP_MAX_BODY_BYTES = 64 * 1024;
@@ -42,6 +45,8 @@ export type McpAuthOptions = {
    * challenge because the origin is not the authorization server.
    */
   authenticate?: (request: Request) => Promise<McpPrincipal | null>;
+  /** Metadata only; never receives arguments or result content. Best effort. */
+  auditTool?: (principal: McpPrincipal, name: string, outcome: "denied" | "succeeded" | "failed", durationMs: number) => void;
 };
 
 type McpEnv = {
@@ -105,8 +110,7 @@ async function bearerToken(request: Request): Promise<string | null> {
 /**
  * The personal operator bearer is intentionally checked first and resolves to the
  * existing fixed MCP device with every scope. OAuth access tokens resolve to the
- * same owner device with only their granted scopes. D1 is consulted only when both
- * beta opt-ins exist.
+ * same owner device with only their granted scopes. No beta lookup occurs here.
  */
 export async function authenticateMcpRequest(
   request: Request,
@@ -129,9 +133,18 @@ export async function authenticateMcpRequest(
       return { kind: "oauth", ownerId: "owner", deviceId: env.MCP_DEVICE_ID, terminalEnabled: true, scopes };
     }
   }
+  return null;
+}
+
+/** Separate beta credential domain: never reads personal bearer or OAuth verifiers. */
+export async function authenticateBetaMcpRequest(
+  request: Request, env: Pick<McpEnv, "BETA_REGISTRY_ENABLED" | "BETA_REGISTRY">,
+): Promise<McpPrincipal | null> {
   if (env.BETA_REGISTRY_ENABLED !== "true" || !env.BETA_REGISTRY) return null;
+  const candidate = await bearerToken(request);
+  if (!candidate || candidate.length > 512) return null;
   const beta = await resolveBetaBearerHash(env.BETA_REGISTRY, await hashBearerToken(candidate));
-  return beta ? { kind: "beta", ...beta, scopes: OAUTH_SCOPES } : null;
+  return beta ? { kind: "beta", ...beta, scopes: beta.terminalEnabled ? OAUTH_SCOPES : [SCOPE_READ, SCOPE_WRITE] } : null;
 }
 
 /**
@@ -181,27 +194,13 @@ export async function readBoundedText(request: Request, maxBytes: number): Promi
   }
   if (!request.body) return { ok: true, text: "" };
 
-  const reader = request.body.getReader();
-  const decoder = new TextDecoder();
-  let received = 0;
-  let text = "";
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.byteLength;
-      if (received > maxBytes) {
-        await reader.cancel("request too large").catch(() => {});
-        return { ok: false, status: 413, message: "Payload Too Large" };
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-  } catch {
+    const bytes = await readBoundedBody(request.body, maxBytes, { ignoreCancelErrors: true });
+    return { ok: true, text: new TextDecoder().decode(bytes) };
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return { ok: false, status: 413, message: "Payload Too Large" };
     return { ok: false, status: 400, message: "Bad request body" };
-  } finally {
-    reader.releaseLock();
   }
-  return { ok: true, text: text + decoder.decode() };
 }
 
 /**
@@ -252,11 +251,16 @@ function createServer(relay: McpRelay, principal: McpPrincipal, auth: McpAuthOpt
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (!isToolApproved(request.params.name)) return toolError("tool_not_approved");
+    const started = Date.now();
+    const audit = (outcome: "denied" | "succeeded" | "failed") => {
+      try { auth.auditTool?.(principal, isToolApproved(request.params.name) ? request.params.name : "unapproved_tool", outcome, Math.max(0, Date.now() - started)); } catch { /* best effort */ }
+    };
+    if (!isToolApproved(request.params.name)) { audit("denied"); return toolError("tool_not_approved"); }
     if (!isToolAllowedForPrincipal(request.params.name, principal)) {
+      audit("denied");
       return { content: [{ type: "text", text: "Tool is not enabled for this device." }], isError: true };
     }
-    if (!hasScope(principal, request.params.name)) return insufficientScope(request.params.name, principal, auth);
+    if (!hasScope(principal, request.params.name)) { audit("denied"); return insufficientScope(request.params.name, principal, auth); }
     try {
       const result = await relay({
         action: "tools/call",
@@ -264,8 +268,10 @@ function createServer(relay: McpRelay, principal: McpPrincipal, auth: McpAuthOpt
         arguments: request.params.arguments,
       }, principal);
       if (!hasRecord(result) || !Array.isArray(result.content)) throw new RelayError("tool_failed");
+      audit(result.isError === true ? "failed" : "succeeded");
       return result;
     } catch (err) {
+      audit("failed");
       return toolError(publicErrorCode(err));
     }
   });

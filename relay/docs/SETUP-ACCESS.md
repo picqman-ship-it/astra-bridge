@@ -73,5 +73,5 @@ ChatGPT discovers Access's OAuth metadata from the 401 challenge and registers i
 
 ## Turning it off or rolling back
 
-- To cut access at once: disable the Access application (or delete the Worker) and stop the Mac agent.
+- Emergency stop: on the Mac run `./install-macos.sh uninstall --yes` to stop the agent (it is also disabled at login) and tracked durable work, then delete the relay Worker in the correct Cloudflare account (or, with the agent still stopped, move both private keys aside and re-run `./install-macos.sh --file-only`, which creates new keys and redeploys before it starts the agent). Access protects `/mcp` only; disabling Access does **not** revoke signed `/v1/device/*` RPC. Do not delete job records while shutdown is unconfirmed. Inspect separately any programs previously detached from tracked process groups.
 - To switch to the Worker's built-in `static` mode instead: it needs the `MCP_BEARER_TOKEN` and `OAUTH_OWNER_SECRET` Worker secrets and a real `OAUTH_ISSUER`/`OAUTH_RESOURCE` (see `relay/README.md`); without them `/mcp` rejects everyone. Set `MCP_AUTH_MODE` to `"static"`, deploy, then disable the Access application, otherwise the edge keeps blocking requests before they reach the Worker. Note that static mode's OAuth only accepts ChatGPT's older fixed callback, so Access mode is the recommended path.

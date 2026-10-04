@@ -17,12 +17,14 @@ import { assertPrivateDir, BearerToken, generateToken, RemoteSetupError, tokenWe
 
 const USAGE =
   'Usage: node dist/remote/setup.js [--remote-dir <dir>] --root <dir> [--root <dir> ...]\n' +
-  '                                 [--protect <dir> ...] [--port <n>] [--trusted-terminal] [--rotate-token] [--replace-config]\n\n' +
+  '                                 [--protect <dir> ...] [--port <n>] [--trusted-terminal] [--trusted-gui]\n' +
+  '                                 [--rotate-token] [--replace-config]\n\n' +
   '  --root <dir>         directory the remote file/search tools may use (repeatable; required for a new config)\n' +
   '  --protect <dir>      extra location no root may be, contain or sit inside, e.g. the code of a program\n' +
   '                       that runs this server (repeatable; written to remote.json "protectedPaths")\n' +
   `  --port <n>           loopback port (default ${DEFAULT_PORT})\n` +
   '  --trusted-terminal   also expose shell/process tools (arbitrary code execution as you)\n' +
+  '  --trusted-gui        also expose the macOS GUI tools (read and operate app windows; needs Accessibility)\n' +
   '  --rotate-token       replace the existing token (clients must be given the new one)\n' +
   '  --replace-config     overwrite an existing remote.json\n';
 
@@ -70,6 +72,7 @@ function main(): void {
   const protect: string[] = [];
   let port = DEFAULT_PORT;
   let trusted = false;
+  let gui = false;
   let rotate = false;
   let replace = false;
   for (let i = 0; i < rest.length; i++) {
@@ -78,6 +81,7 @@ function main(): void {
     else if (a === '--protect') protect.push(path.resolve(rest[++i] ?? ''));
     else if (a === '--port') port = Number(rest[++i]);
     else if (a === '--trusted-terminal') trusted = true;
+    else if (a === '--trusted-gui') gui = true;
     else if (a === '--rotate-token') rotate = true;
     else if (a === '--replace-config') replace = true;
     else {
@@ -107,6 +111,7 @@ function main(): void {
       port,
       roots,
       trustedTerminal: trusted,
+      trustedGui: gui,
       allowedOrigins: [],
       blockedCommands: DEFAULT_BLOCKED_COMMANDS,
       defaultShell: defaultShell(),
@@ -116,7 +121,7 @@ function main(): void {
     parseRemoteConfig(text, p.dir); // refuse before writing anything the server would reject
     writePrivate(p.file, text);
     configAction = configExists ? 'replaced' : 'created';
-  } else if (roots.length || trusted || protect.length) {
+  } else if (roots.length || trusted || gui || protect.length) {
     process.stderr.write('remote.json exists and was not changed (use --replace-config to rewrite it).\n');
   }
 
@@ -140,6 +145,7 @@ function main(): void {
       `Listen: http://${loaded.host}:${loaded.port}/mcp`,
       `Roots: ${loaded.roots.join(', ')}`,
       `Trusted terminal: ${loaded.trustedTerminal ? 'ON — shell/process tools exposed' : 'off'}`,
+      `Trusted GUI: ${loaded.trustedGui ? 'ON — app-window tools exposed (grant Accessibility to Node when macOS asks)' : 'off'}`,
       'Next: npm run remote:doctor',
       '',
     ].join('\n'),

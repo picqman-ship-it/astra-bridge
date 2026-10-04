@@ -9,7 +9,7 @@ Astra Bridge connects ChatGPT to a dedicated workspace on your own Mac through a
 
 [Download beta.2](https://github.com/picqman-ship-it/astra-bridge/releases/tag/v0.1.0-beta.2) · [Security](SECURITY.md) · [File-only walkthrough](#file-only-walkthrough) · [Advanced self-deploy](#advanced-self-deploy-on-macos)
 
-> This page documents beta.2. Use its release archive or tagged checkout below; the code on `main` is the earlier template.
+> This page documents beta.2. Use its release archive or tagged checkout below for the published source; the listed SHA-256 applies to the named release asset.
 
 ## Why this exists / what it proves
 

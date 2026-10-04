@@ -3,6 +3,8 @@ import '../bootstrap.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
+import { JOBS_DISABLED_FILE } from './offboarding.js';
 import { childEnv, shellSpawnArgs } from '../terminal/shell.js';
 import { VERSION } from '../version.js';
 import { EX_CONFIG, parseRemoteArgs, rejectExtraArgs } from './cli.js';
@@ -322,6 +324,7 @@ async function tick(): Promise<'ok' | 'exit' | 'lost'> {
   return store.lock.with(async () => {
     const w = store.readWorker();
     if (!w || w.nonce !== nonce) return 'lost';
+    if (fs.lstatSync(path.join(store.root, JOBS_DISABLED_FILE), { throwIfNoEntry: false })) return 'lost';
     if (Date.now() - lastBeat >= HEARTBEAT_EVERY_MS) heartbeat(w);
 
     const queued: JobRecord[] = [];
@@ -413,6 +416,7 @@ async function main(): Promise<void> {
 
   const me: WorkerRecord = { v: 1, pid: process.pid, identity: ownIdentity(), nonce, startedAt: now(), heartbeatAt: Date.now() };
   const claimed = await store.lock.with(() => {
+    if (fs.lstatSync(path.join(store.root, JOBS_DISABLED_FILE), { throwIfNoEntry: false })) return false;
     const h = store.workerHealth();
     if (h.state === 'running' || h.state === 'unresponsive') return false;
     writeAtomic(store.workerFile, JSON.stringify(me) + '\n');
